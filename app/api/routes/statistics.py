@@ -1,7 +1,8 @@
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.api.dependencies import require_roles
 from app.api.schemas import StatisticsResponse
 from app.database.repository import AlertRepository
 
@@ -15,9 +16,18 @@ repository = AlertRepository()
     "/statistics",
     response_model=StatisticsResponse,
 )
-def get_statistics() -> dict[str, Any]:
+def get_statistics(
+    current_user: dict = Depends(
+        require_roles(
+            "ADMIN",
+            "ANALYST",
+        )
+    ),
+) -> dict[str, Any]:
     """
     Return high-level AISOP alert statistics.
+
+    Requires ADMIN or ANALYST permissions.
     """
 
     total = repository.count_alerts()

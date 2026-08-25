@@ -1,7 +1,8 @@
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.api.dependencies import require_roles
 from app.api.schemas import AlertListResponse
 from app.database.repository import AlertRepository
 
@@ -31,9 +32,19 @@ def get_alerts(
         ge=0,
         description="Number of alerts to skip.",
     ),
+    current_user: dict = Depends(
+        require_roles(
+            "ADMIN",
+            "ANALYST",
+            "VIEWER",
+        )
+    ),
 ) -> dict[str, Any]:
     """
     Retrieve persisted AISOP security alerts.
+
+    Requires an authenticated user with
+    ADMIN, ANALYST, or VIEWER role.
     """
 
     if severity:
@@ -59,6 +70,7 @@ def get_alerts(
             severity=severity,
             limit=limit,
         )
+
     else:
         alerts = repository.get_alerts(
             limit=limit,
@@ -74,9 +86,21 @@ def get_alerts(
 
 
 @router.get("/alerts/{alert_id}")
-def get_alert(alert_id: int) -> dict[str, Any]:
+def get_alert(
+    alert_id: int,
+    current_user: dict = Depends(
+        require_roles(
+            "ADMIN",
+            "ANALYST",
+            "VIEWER",
+        )
+    ),
+) -> dict[str, Any]:
     """
     Retrieve one security alert by ID.
+
+    Requires an authenticated user with
+    ADMIN, ANALYST, or VIEWER role.
     """
 
     if alert_id <= 0:
