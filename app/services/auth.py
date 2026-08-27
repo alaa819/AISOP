@@ -1,14 +1,9 @@
 from app.core.security.password import verify_password
 from app.core.security.token import create_access_token
+from app.database.user_repository import UserRepository
 
 
-DEVELOPMENT_USER = {
-    "username": "ala",
-    "role": "ADMIN",
-    "password_hash": (
-        "$argon2id$v=19$m=65536,t=3,p=4$XS95/WfQ2fJgmtspohF1ug$FBz3PSn1N893AOVsw4CwI1R2/KyuhV1ulZ0f7u/hKr8"
-    ),
-}
+repository = UserRepository()
 
 
 def authenticate_user(
@@ -16,19 +11,27 @@ def authenticate_user(
     password: str,
 ) -> str | None:
     """
-    Authenticate a development user and return a JWT.
+    Authenticate a user using the database.
+
+    Returns a JWT access token when authentication succeeds.
+    Returns None when authentication fails.
     """
 
-    if username != DEVELOPMENT_USER["username"]:
+    user = repository.get_user_by_username(username)
+
+    if user is None:
+        return None
+
+    if not user["is_active"]:
         return None
 
     if not verify_password(
         password,
-        DEVELOPMENT_USER["password_hash"],
+        user["password_hash"],
     ):
         return None
 
     return create_access_token(
-        subject=username,
-        role=DEVELOPMENT_USER["role"],
+        subject=user["username"],
+        role=user["role"],
     )

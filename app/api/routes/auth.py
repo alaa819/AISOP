@@ -18,6 +18,10 @@ router = APIRouter(
     response_model=TokenResponse,
 )
 def login(request: LoginRequest):
+    """
+    Authenticate a user and return a JWT access token.
+    """
+
     token = authenticate_user(
         request.username,
         request.password,
