@@ -179,3 +179,31 @@ def test_viewer_cannot_access_admin_status():
     )
 
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------
+
+
+def test_login_rate_limit():
+    for _ in range(5):
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "username": "invalid-user",
+                "password": "invalid-password",
+            },
+        )
+
+        assert response.status_code == 401
+
+    response = client.post(
+        "/api/v1/auth/login",
+        json={
+            "username": "invalid-user",
+            "password": "invalid-password",
+        },
+    )
+
+    assert response.status_code == 429

@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 
 from app.api.schemas.auth import (
     LoginRequest,
     TokenResponse,
 )
+from app.core.security.rate_limit import limiter
 from app.services.auth import authenticate_user
 
 
@@ -17,14 +18,20 @@ router = APIRouter(
     "/login",
     response_model=TokenResponse,
 )
-def login(request: LoginRequest):
+@limiter.limit("5/minute")
+def login(
+    request: Request,
+    credentials: LoginRequest,
+):
     """
     Authenticate a user and return a JWT access token.
+
+    Rate limited to 5 requests per minute per client IP.
     """
 
     token = authenticate_user(
-        request.username,
-        request.password,
+        credentials.username,
+        credentials.password,
     )
 
     if token is None:

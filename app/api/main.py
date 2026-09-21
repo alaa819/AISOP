@@ -1,10 +1,13 @@
 from fastapi import FastAPI
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 from app.api.routes.admin import router as admin_router
 from app.api.routes.alerts import router as alerts_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
 from app.api.routes.statistics import router as statistics_router
+from app.core.security.rate_limit import limiter
 from app.database.schema import initialize_database
 
 
@@ -17,6 +20,14 @@ app = FastAPI(
         "and administrative operations."
     ),
     version="1.0.0",
+)
+
+
+app.state.limiter = limiter
+
+app.add_exception_handler(
+    RateLimitExceeded,
+    _rate_limit_exceeded_handler,
 )
 
 
