@@ -11,6 +11,7 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
 from app.api.routes.statistics import router as statistics_router
 
+from app.core.security.headers import security_headers_middleware
 from app.core.security.rate_limit import limiter
 
 from app.database.schema import initialize_database
@@ -34,6 +35,9 @@ app = FastAPI(
     ),
     version="1.0.0",
 )
+
+
+app.middleware("http")(security_headers_middleware)
 
 
 app.state.limiter = limiter

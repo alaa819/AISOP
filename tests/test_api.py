@@ -97,3 +97,30 @@ def test_missing_alert():
 
     finally:
         app.dependency_overrides.clear()
+        # ---------------------------------------------------------
+# Security headers
+# ---------------------------------------------------------
+
+
+def test_security_headers():
+    response = client.get(
+        "/api/v1/health"
+    )
+
+    assert response.status_code == 200
+
+    assert response.headers[
+        "X-Content-Type-Options"
+    ] == "nosniff"
+
+    assert response.headers[
+        "X-Frame-Options"
+    ] == "DENY"
+
+    assert response.headers[
+        "Referrer-Policy"
+    ] == "no-referrer"
+
+    assert response.headers[
+        "Content-Security-Policy"
+    ] == "default-src 'self'"
