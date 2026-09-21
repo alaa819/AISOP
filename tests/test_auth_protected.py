@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from app.api.main import app
+from app.core.security.rate_limit import limiter
 from app.core.security.token import create_access_token
 
 
@@ -207,3 +208,31 @@ def test_login_rate_limit():
     )
 
     assert response.status_code == 429
+
+
+# ---------------------------------------------------------
+# Audit logging
+# ---------------------------------------------------------
+
+
+def test_failed_login_creates_audit_log(caplog):
+    limiter.reset()
+
+    with caplog.at_level(
+        "INFO",
+        logger="aisop.audit",
+    ):
+        response = client.post(
+            "/api/v1/auth/login",
+            json={
+                "username": "audit-test-user",
+                "password": "wrong-password",
+            },
+        )
+
+    assert response.status_code == 401
+
+    assert "user=audit-test-user" in caplog.text
+    assert "action=LOGIN" in caplog.text
+    assert "result=FAILURE" in caplog.text
+    assert "endpoint=/api/v1/auth/login" in caplog.text

@@ -1,4 +1,7 @@
+import logging
+
 from fastapi import FastAPI
+
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -7,8 +10,18 @@ from app.api.routes.alerts import router as alerts_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
 from app.api.routes.statistics import router as statistics_router
+
 from app.core.security.rate_limit import limiter
+
 from app.database.schema import initialize_database
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format=(
+        "%(asctime)s | %(name)s | %(levelname)s | %(message)s"
+    ),
+)
 
 
 app = FastAPI(
