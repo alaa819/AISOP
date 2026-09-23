@@ -12,6 +12,9 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
 from app.api.routes.statistics import router as statistics_router
 
+from app.core.security.error_handling import (
+    unhandled_exception_handler,
+)
 from app.core.security.headers import security_headers_middleware
 from app.core.security.rate_limit import limiter
 from app.core.security.request_id import request_id_middleware
@@ -36,6 +39,16 @@ app = FastAPI(
         "and administrative operations."
     ),
     version="1.0.0",
+)
+
+
+# ---------------------------------------------------------
+# Exception handling
+# ---------------------------------------------------------
+
+app.add_exception_handler(
+    Exception,
+    unhandled_exception_handler,
 )
 
 

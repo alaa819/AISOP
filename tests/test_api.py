@@ -196,3 +196,40 @@ def test_request_id_is_preserved():
     assert response.headers[
         "X-Request-ID"
     ] == request_id
+    # ---------------------------------------------------------
+# Secure error handling
+# ---------------------------------------------------------
+
+
+def test_unhandled_exception_returns_safe_response():
+    from fastapi.testclient import TestClient
+
+    from app.api.main import app
+
+    def raise_error():
+        raise RuntimeError(
+            "This is a secret internal error."
+        )
+
+    app.add_api_route(
+        "/api/v1/test-error",
+        raise_error,
+        methods=["GET"],
+    )
+
+    test_client = TestClient(
+        app,
+        raise_server_exceptions=False,
+    )
+
+    response = test_client.get(
+        "/api/v1/test-error"
+    )
+
+    assert response.status_code == 500
+
+    assert response.json()["detail"] == (
+        "Internal server error."
+    )
+
+    assert "secret internal error" not in response.text
