@@ -124,3 +124,37 @@ def test_security_headers():
     assert response.headers[
         "Content-Security-Policy"
     ] == "default-src 'self'"
+    # ---------------------------------------------------------
+# CORS
+# ---------------------------------------------------------
+
+
+def test_cors_allows_configured_origin():
+    response = client.get(
+        "/api/v1/health",
+        headers={
+            "Origin": "http://localhost:3000",
+        },
+    )
+
+    assert response.status_code == 200
+
+    assert response.headers[
+        "access-control-allow-origin"
+    ] == "http://localhost:3000"
+
+
+def test_cors_rejects_unconfigured_origin():
+    response = client.get(
+        "/api/v1/health",
+        headers={
+            "Origin": "http://malicious-example.com",
+        },
+    )
+
+    assert response.status_code == 200
+
+    assert (
+        "access-control-allow-origin"
+        not in response.headers
+    )
