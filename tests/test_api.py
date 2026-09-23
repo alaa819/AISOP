@@ -158,3 +158,41 @@ def test_cors_rejects_unconfigured_origin():
         "access-control-allow-origin"
         not in response.headers
     )
+    # ---------------------------------------------------------
+# Request IDs
+# ---------------------------------------------------------
+
+
+def test_request_id_is_generated():
+    response = client.get(
+        "/api/v1/health"
+    )
+
+    assert response.status_code == 200
+
+    request_id = response.headers.get(
+        "X-Request-ID"
+    )
+
+    assert request_id is not None
+
+    import uuid
+
+    uuid.UUID(request_id)
+
+
+def test_request_id_is_preserved():
+    request_id = "test-request-123"
+
+    response = client.get(
+        "/api/v1/health",
+        headers={
+            "X-Request-ID": request_id,
+        },
+    )
+
+    assert response.status_code == 200
+
+    assert response.headers[
+        "X-Request-ID"
+    ] == request_id

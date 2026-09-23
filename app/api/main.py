@@ -14,6 +14,7 @@ from app.api.routes.statistics import router as statistics_router
 
 from app.core.security.headers import security_headers_middleware
 from app.core.security.rate_limit import limiter
+from app.core.security.request_id import request_id_middleware
 
 from app.database.schema import initialize_database
 
@@ -38,8 +39,17 @@ app = FastAPI(
 )
 
 
-app.middleware("http")(security_headers_middleware)
+# ---------------------------------------------------------
+# Security middleware
+# ---------------------------------------------------------
 
+app.middleware("http")(security_headers_middleware)
+app.middleware("http")(request_id_middleware)
+
+
+# ---------------------------------------------------------
+# CORS
+# ---------------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,9 +68,14 @@ app.add_middleware(
     allow_headers=[
         "Authorization",
         "Content-Type",
+        "X-Request-ID",
     ],
 )
 
+
+# ---------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------
 
 app.state.limiter = limiter
 
@@ -70,8 +85,16 @@ app.add_exception_handler(
 )
 
 
+# ---------------------------------------------------------
+# Database
+# ---------------------------------------------------------
+
 initialize_database()
 
+
+# ---------------------------------------------------------
+# API routes
+# ---------------------------------------------------------
 
 app.include_router(
     health_router,
