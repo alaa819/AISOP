@@ -27,3 +27,38 @@ services:
       - no-new-privileges:true
 
     restart: unless-stopped
+
+  aisop-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: aisop-monitor
+
+    env_file:
+      - .env
+
+    command:
+      - python
+      - -m
+      - app.monitor
+
+    group_add:
+      - "4"
+      
+    volumes:
+      - ./data:/app/data
+      - /var/log:/var/log:ro
+
+    read_only: true
+
+    tmpfs:
+      - /tmp
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    restart: unless-stopped

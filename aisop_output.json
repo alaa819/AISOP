@@ -1,1 +1,74 @@
-[]
+[
+    {
+        "alert": {
+            "timestamp": "2026-10-05T21:59:31.656444+00:00",
+            "rule_id": "AUTH-001",
+            "title": "Failed SSH Authentication",
+            "severity": "MEDIUM",
+            "risk_score": 50,
+            "host": "ala",
+            "service": "sshd[99999]",
+            "description": "A failed SSH authentication attempt was detected.",
+            "recommendation": "Investigate the source address and determine whether multiple failed authentication attempts occurred.",
+            "source_ip": null,
+            "raw_event": null,
+            "analysis": "Investigation recommended."
+        },
+        "assessment": "Investigation recommended.",
+        "analyst_summary": "Failed SSH Authentication detected on ala. Current risk score: 50/100."
+    },
+    {
+        "alert": {
+            "timestamp": "2026-10-05T23:10:17.320193+00:00",
+            "rule_id": "AUTH-001",
+            "title": "Failed SSH Authentication",
+            "severity": "MEDIUM",
+            "risk_score": 50,
+            "host": "ala",
+            "service": "sshd[88888]",
+            "description": "A failed SSH authentication attempt was detected.",
+            "recommendation": "Investigate the source address and determine whether multiple failed authentication attempts occurred.",
+            "source_ip": null,
+            "raw_event": null,
+            "analysis": "Investigation recommended."
+        },
+        "assessment": "Investigation recommended.",
+        "analyst_summary": "Failed SSH Authentication detected on ala. Current risk score: 50/100."
+    },
+    {
+        "alert": {
+            "timestamp": "2026-10-05T21:59:31.656444+00:00",
+            "rule_id": "AUTH-002",
+            "title": "Invalid SSH User",
+            "severity": "MEDIUM",
+            "risk_score": 60,
+            "host": "ala",
+            "service": "sshd[99999]",
+            "description": "An SSH authentication attempt targeted an invalid user.",
+            "recommendation": "Investigate the source address for reconnaissance or brute-force activity.",
+            "source_ip": null,
+            "raw_event": null,
+            "analysis": "Investigation recommended."
+        },
+        "assessment": "Investigation recommended.",
+        "analyst_summary": "Invalid SSH User detected on ala. Current risk score: 60/100."
+    },
+    {
+        "alert": {
+            "timestamp": "2026-10-05T23:10:17.320193+00:00",
+            "rule_id": "AUTH-002",
+            "title": "Invalid SSH User",
+            "severity": "MEDIUM",
+            "risk_score": 60,
+            "host": "ala",
+            "service": "sshd[88888]",
+            "description": "An SSH authentication attempt targeted an invalid user.",
+            "recommendation": "Investigate the source address for reconnaissance or brute-force activity.",
+            "source_ip": null,
+            "raw_event": null,
+            "analysis": "Investigation recommended."
+        },
+        "assessment": "Investigation recommended.",
+        "analyst_summary": "Invalid SSH User detected on ala. Current risk score: 60/100."
+    }
+]
