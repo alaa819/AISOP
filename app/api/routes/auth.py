@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from app.api.dependencies import get_current_user
 from app.api.schemas.auth import (
     LoginRequest,
     TokenResponse,
@@ -63,3 +64,19 @@ def login(
         access_token=token,
         token_type="bearer",
     )
+
+
+@router.get("/me")
+def get_me(
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Return the authenticated user's identity and role.
+
+    Requires a valid Bearer access token.
+    """
+
+    return {
+        "username": current_user["username"],
+        "role": current_user["role"],
+    }

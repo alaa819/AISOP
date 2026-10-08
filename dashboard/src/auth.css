@@ -1,0 +1,53 @@
+/* Save as dashboard/src/auth.css. App.tsx imports this file. */
+.aisop-auth {
+  --auth-bg: #101719;
+  --auth-card: #182124;
+  --auth-text: #e9edef;
+  --auth-muted: #9aa9af;
+  --auth-border: #334146;
+  --auth-accent: #e6a36c;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 72px 24px;
+  box-sizing: border-box;
+  color: var(--auth-text);
+  background: radial-gradient(ellipse at 20% 10%, #e6a36c10, transparent 55%), var(--auth-bg);
+}
+.aisop-auth[data-theme="light"] {
+  --auth-bg: #f3f5f5;
+  --auth-card: #ffffff;
+  --auth-text: #202b30;
+  --auth-muted: #596970;
+  --auth-border: #d5dfe2;
+  --auth-accent: #9d5420;
+}
+.aisop-auth-theme { position: absolute; top: 24px; right: 24px; color: var(--auth-text); }
+.aisop-auth-card {
+  width: 100%;
+  max-width: 440px;
+  padding: 40px;
+  box-sizing: border-box;
+  border: 1px solid var(--auth-border);
+  border-radius: 16px;
+  background: var(--auth-card);
+  box-shadow: 0 24px 80px #00000020;
+}
+.aisop-auth .brand { padding: 0; margin-bottom: 38px; }
+.aisop-auth .brand-mark { color: var(--auth-accent); }
+.aisop-auth .brand strong { color: var(--auth-text); }
+.aisop-auth .brand span { color: var(--auth-muted); }
+.aisop-auth-eyebrow { font-size: 10px; font-weight: 600; letter-spacing: .14em; color: var(--auth-accent); }
+.aisop-auth h1 { margin: 12px 0; font-size: 29px; line-height: 1.2; letter-spacing: -.025em; color: var(--auth-text); }
+.aisop-auth-description { font-size: 13px; line-height: 1.7; color: var(--auth-muted); margin: 0 0 26px; }
+.aisop-auth .field-label { display: block; margin: 18px 0 8px; color: var(--auth-text); }
+.aisop-auth .text-input { width: 100%; box-sizing: border-box; padding: 12px 14px; border: 1px solid var(--auth-border); border-radius: 7px; background: var(--auth-bg); color: var(--auth-text); font: inherit; font-size: 14px; }
+.aisop-auth .text-input::placeholder { color: var(--auth-muted); }
+.aisop-auth :is(input, button):focus-visible { outline: 2px solid var(--auth-accent); outline-offset: 3px; }
+.aisop-auth-submit { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; margin-top: 26px; min-height: 44px; border: 0; border-radius: 7px; background: var(--auth-accent); color: var(--auth-bg); font-weight: 600; cursor: pointer; }
+.aisop-auth-submit:disabled { opacity: .6; cursor: default; }
+.aisop-auth-error { border: 1px solid #c8776660; background: #c8776610; color: var(--auth-text); border-radius: 7px; padding: 12px 14px; font-size: 13px; line-height: 1.6; }
+.aisop-auth-check { display: flex; align-items: center; gap: 10px; padding: 16px 0; font-size: 13px; color: var(--auth-muted); }
+.aisop-auth-footer { display: flex; align-items: center; justify-content: center; gap: 8px; border-top: 1px solid var(--auth-border); padding-top: 22px; margin-top: 28px; font-size: 11px; color: var(--auth-muted); }
+@media (max-width: 480px) { .aisop-auth { padding: 72px 16px 24px; } .aisop-auth-card { padding: 28px 24px; } }

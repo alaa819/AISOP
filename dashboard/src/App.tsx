@@ -1,12 +1,46 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
+  ApiRequestError, getApiErrorMessage, isBackendUnavailable, subscribeUnauthorized,
+  login, logout, hasAccessToken, getCurrentUser,
+  type CurrentUser,
   getStatistics,
   getAlerts,
   type Alert,
+  type AlertsResponse,
 } from "./services/api";
+
+type DataStatus = "loading" | "success" | "empty" | "error";
+type SectionState = { status: DataStatus; refreshing: boolean; error: string | null; updatedAt: number | null };
+const initialSectionState: SectionState = { status: "loading", refreshing: false, error: null, updatedAt: null };
+
+function DataSectionStatus({ label, state, hasData, onRetry, retryAllowed = true }: { label: string; state: SectionState; hasData: boolean; onRetry: () => void; retryAllowed?: boolean }) {
+  const stale = state.status === "error" && hasData;
+  if (state.status === "success" && !state.refreshing) return null;
+  if (state.status === "empty" && !state.refreshing) return label === "Statistics" ? <div className="overview-status" data-section="statistics" data-state="empty" role="status">Statistics: No alerts recorded.</div> : null;
+  return <div className="overview-status" data-section={label.toLowerCase()} data-state={state.status} role={state.status === "error" ? "alert" : "status"} style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+    {state.refreshing && <span className="loading-spinner"/>}
+    <span><strong>{label}: </strong>{state.status === "error" ? <>{stale ? "Stale data — showing the last successful results. " : "Data unavailable. "}{state.error}{stale && state.updatedAt !== null && <> Last updated {new Date(state.updatedAt).toLocaleTimeString()}.</>}{state.refreshing && " Retrying…"}</> : hasData ? "Updating…" : "Loading…"}</span>
+    {state.status === "error" && retryAllowed && <Button onClick={onRetry} disabled={state.refreshing}>Retry {label}</Button>}
+  </div>;
+}
+
 type Severity = "High" | "Medium" | "Low" | "Informational";
 type Page = "Overview" | "Events & Alerts" | "Investigations" | "Linux Hosts" | "Logs" | "Detection Rules" | "Reports" | "Settings";
+function getPermissions(role: CurrentUser["role"]) {
+  const isAdmin = role.toUpperCase() === "ADMIN";
+  const isAnalyst = role.toUpperCase() === "ANALYST";
+  return {
+    canAccessSettings: isAdmin,
+    canEditInvestigations: isAdmin || isAnalyst,
+    canManageRules: isAdmin,
+    canViewStatistics: isAdmin || isAnalyst,
+  };
+}
+function canAccessPage(page: Page, permissions: ReturnType<typeof getPermissions>) {
+  return page !== "Settings" || permissions.canAccessSettings;
+}
+
 type Event = { id: string; time: string; severity: Severity; title: string; host: string; source: string; status: string; user: string; ip: string; process: string; raw: string };
 type Host = { name: string; ip: string; os: string; alerts: number; severity: Severity; last: string; status: string; cpu: number; memory: number };
 type Investigation = { id: string; name: string; severity: Severity; host: string; status: string; analyst: string; created: string; updated: string; summary: string };
@@ -58,6 +92,9 @@ const paths: Record<string, ReactNode> = {
   moon: <path d="M20.5 14.1A8.5 8.5 0 0 1 9.9 3.5a8.5 8.5 0 1 0 10.6 10.6Z"/>,
   user: <><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></>,
   logout: <><path d="M10 5H5v14h5M14 8l4 4-4 4m4-4H9"/></>,
+  eye: <><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></>,
+  "eye-off": <><path d="m3 3 18 18M10.6 6.2A9.8 9.8 0 0 1 12 6c6 0 9.5 6 9.5 6a16 16 0 0 1-2.2 2.8M6.1 6.1C3.8 7.7 2.5 12 2.5 12s3.5 6 9.5 6a9 9 0 0 0 3.2-.6M10.3 10.3a2.5 2.5 0 0 0 3.4 3.4"/></>,
+  lock: <><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></>,
 };
 function Icon({ name, size = 18, className = "" }: { name: string; size?: number; className?: string }) { return <svg className={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>; }
 function Button({ children, icon, variant = "secondary", onClick, className = "", disabled = false, title }: { children?: ReactNode; icon?: string; variant?: "primary" | "secondary" | "ghost"; onClick?: () => void; className?: string; disabled?: boolean; title?: string }) { return <button type="button" title={title} disabled={disabled} onClick={onClick} className={`btn btn-${variant} ${className}`}>{icon && <Icon name={icon} size={16}/ >}{children}</button>; }
@@ -85,7 +122,7 @@ function ActivityChart() {
     }, 2000);
     return () => { window.clearInterval(ticker); };
   }, []);
-  const samples = (severity: string) => Array.from({ length: 24 }, (_, i) => series[severity][(frame + i) % 32]);
+  const samples = (severity: string) => Array.from({ length: 24 }, (_, i) => (series[severity]?.[(frame + i) % 32] ?? 0));
   const pointX = (i: number) => (i / 23) * 960;
   const pointY = (value: number) => 158 - value * 1.42;
   const line = (values: number[]) => values.map((value, i) => `${pointX(i)},${pointY(value)}`).join(" ");
@@ -98,7 +135,7 @@ function ActivityChart() {
         {[16,51,87,122,158].map(y => <line key={y} x1="0" x2="960" y1={y} y2={y} className="grid-line"/>)}
         <line x1={pointX(selected)} x2={pointX(selected)} y1="9" y2="158" className="selected-line"/>
         {visible.map(s => <polyline key={s} points={line(samples(s))} fill="none" stroke={chartColors[s]} strokeWidth="1.8" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" className="telemetry-line"/>)}
-        {visible.map(s => <circle key={s} cx={pointX(selected)} cy={pointY(samples(s)[selected])} r="3.5" fill={chartColors[s]} stroke="var(--surface)" strokeWidth="1.5"/>)}
+        {visible.map(s => <circle key={s} cx={pointX(selected)} cy={pointY(samples(s)[selected] ?? 0)} r="3.5" fill={chartColors[s]} stroke="var(--surface)" strokeWidth="1.5"/>)}
       </svg>
       <div className="chart-tooltip" style={{ left: `${Math.max(15, Math.min(85, selected / 23 * 100))}%` }}><strong>{timeAt(selected)}</strong>{Object.keys(series).map(s => <div key={s} className={!visible.includes(s) ? "hidden-severity" : ""}><span><i style={{ background: chartColors[s] }}/>{s}</span><b>{samples(s)[selected]}</b></div>)}</div>
       <div className="chart-x">{[0,4,8,12,16,20,23].map(index => <span key={index}>{timeAt(index)}</span>)}</div>
@@ -116,16 +153,28 @@ function SeverityChart({ statistics }: { statistics: { total_alerts: number; sev
   return <><div className="severity-total"><strong>{total}</strong><span>total alerts</span></div><div className="severity-stack">{data.map(d => <span key={d.label} style={{ width: `${d.pct}%`, background: chartColors[d.label] }} title={`${d.label}: ${d.value}`}/>)}</div><div className="severity-rows">{data.map(d => <div key={d.label}><span><i style={{ background: chartColors[d.label] }}/>{d.label}</span><strong>{d.value}</strong><span className="muted">{Math.round(d.pct)}%</span></div>)}</div></>;
 }
 
-export default function App() {
+function Dashboard({ currentUser, theme, toggleTheme, onLogout }: { currentUser: CurrentUser; theme: "dark" | "light"; toggleTheme: () => void; onLogout: (message?: string) => void }) {
+  const permissions = getPermissions(currentUser.role);
+  const { canAccessSettings, canEditInvestigations, canManageRules, canViewStatistics } = permissions;
+  const initials = currentUser.username.split(/[\s._@-]+/).filter(Boolean).slice(0, 2).map(part => part[0]).join("").toUpperCase() || "U";
   const [page, setPage] = useState<Page>("Overview");
   const [search, setSearch] = useState(""); const [globalSearch, setGlobalSearch] = useState("");
-  const [severity, setSeverity] = useState("All severities"); const [hostFilter, setHostFilter] = useState("All hosts"); const [statusFilter, setStatusFilter] = useState("All statuses"); const [typeFilter, setTypeFilter] = useState("All event types"); const [sourceFilter, setSourceFilter] = useState("All sources"); const [userFilter, setUserFilter] = useState(""); const [processFilter, setProcessFilter] = useState("");
+  const [severity, updateSeverity] = useState("All severities");
+  const [alertsPage, setAlertsPage] = useState(1);
+  const alertsPageSize = 10;
+  const setSeverity = (value: string) => { updateSeverity(value); setAlertsPage(1); }; const [hostFilter, setHostFilter] = useState("All hosts"); const [statusFilter, setStatusFilter] = useState("All statuses"); const [typeFilter, setTypeFilter] = useState("All event types"); const [sourceFilter, setSourceFilter] = useState("All sources"); const [userFilter, setUserFilter] = useState(""); const [processFilter, setProcessFilter] = useState("");
   const [timeRange, setTimeRange] = useState("Last 24 hours");
-  const [theme, setTheme] = useState<"dark" | "light">(() => localStorage.getItem("aisop-theme") === "light" ? "light" : "dark");
-  const toggleTheme = () => setTheme(current => { const next = current === "dark" ? "light" : "dark"; localStorage.setItem("aisop-theme", next); return next; });
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null); const [selectedHost, setSelectedHost] = useState<Host | null>(null); const [selectedInvestigation, setSelectedInvestigation] = useState<Investigation | null>(null);
   const [expandedLog, setExpandedLog] = useState<string | null>(null); const [rules, setRules] = useState(initialRules); const [ruleModal, setRuleModal] = useState<Rule | "new" | null>(null); const [ruleName, setRuleName] = useState(""); const [ruleDescription, setRuleDescription] = useState(""); const [ruleSeverity, setRuleSeverity] = useState<Severity>("Medium");
   const [confirmation, setConfirmation] = useState<number | null>(null); const [notice, setNotice] = useState(""); const [showNotifications, setShowNotifications] = useState(false); const [showProfile, setShowProfile] = useState(false); const [showWorkspace, setShowWorkspace] = useState(false); const [mobileNav, setMobileNav] = useState(false); const [hostTab, setHostTab] = useState("Overview"); const [investigationStatus, setInvestigationStatus] = useState<Record<string,string>>({});
+  useEffect(() => {
+    if (!canAccessSettings) {
+      setPage(previous => previous === "Settings" ? "Overview" : previous);
+      setSelectedHost(null);
+      setSelectedInvestigation(null);
+    }
+    if (!canManageRules) { setRuleModal(null); setConfirmation(null); }
+  }, [canAccessSettings, canManageRules]);
   const [refreshing, setRefreshing] = useState(false);
   const [statistics, setStatistics] = useState<{
     total_alerts: number;
@@ -135,73 +184,100 @@ export default function App() {
       low: number;
     };
   } | null>(null);
-  const [statisticsLoading, setStatisticsLoading] = useState(true);
-  const [statisticsError, setStatisticsError] = useState<string | null>(null);
+  const [statisticsState, setStatisticsState] = useState<SectionState>(initialSectionState);
   const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [alertsLoading, setAlertsLoading] = useState(true);
-  const [alertsError, setAlertsError] = useState<string | null>(null);
+  const [alertsState, setAlertsState] = useState<SectionState & { key: string }>({ ...initialSectionState, key: "" });
+
+  // Only Events & Alerts uses backend severity; other page filters remain local.
+  const backendSeverity = page === "Events & Alerts" && severity !== "All severities" ? severity.toLowerCase() : undefined;
+  const requestedOffset = page === "Events & Alerts" ? (alertsPage - 1) * alertsPageSize : 0;
+  const alertsQueryKey = JSON.stringify([backendSeverity ?? "", requestedOffset]);
+  const [alertsMetadata, setAlertsMetadata] = useState({ count: 0, limit: alertsPageSize, offset: 0, key: "", updatedAt: null as number | null });
+  const reloadStatistics = useRef<() => Promise<boolean>>(async () => false);
+  const reloadAlerts = useRef<() => Promise<boolean>>(async () => false);
+  const hasCurrentAlerts = alertsMetadata.key === alertsQueryKey;
+  const currentAlertsState: SectionState = alertsState.key === alertsQueryKey ? alertsState : { ...initialSectionState, refreshing: true };
+  const statisticsLoading = statistics === null && statisticsState.status === "loading";
+  const statisticsError = statisticsState.error;
+  const statisticsStale = statistics !== null && statisticsState.status === "error";
+  const alertsError = currentAlertsState.error;
+  const alertsPending = !hasCurrentAlerts && currentAlertsState.status === "loading";
+  const totalAlertPages = hasCurrentAlerts ? Math.max(1, Math.ceil(alertsMetadata.count / alertsMetadata.limit)) : 1;
+
+  // Statistics settle independently, even if alerts are slow or unavailable.
+  useEffect(() => {
+    let active = true;
+    let pending: Promise<boolean> | null = null;
+    const controller = new AbortController();
+    if (!canViewStatistics) {
+      setStatistics(null);
+      setStatisticsState({ status: "error", refreshing: false, error: "Statistics are unavailable for your role. Alerts remain available.", updatedAt: null });
+      reloadStatistics.current = async () => false;
+      return () => { active = false; controller.abort(); };
+    }
+    async function requestStatistics(): Promise<boolean> {
+      setStatisticsState(previous => ({ ...previous, refreshing: true }));
+      try {
+        const data = await getStatistics(controller.signal);
+        if (!active) return false;
+        const result = data as NonNullable<typeof statistics>;
+        setStatistics(result);
+        setStatisticsState({ status: result.total_alerts === 0 ? "empty" : "success", refreshing: false, error: null, updatedAt: Date.now() });
+        return true;
+      } catch (error) {
+        if (!active) return false;
+        setStatisticsState(previous => ({ ...previous, status: "error", refreshing: false, error: error instanceof ApiRequestError && error.status === 403 ? "Statistics are unavailable for your role. Alerts remain available." : getApiErrorMessage(error) }));
+        return false;
+      }
+    }
+    function loadStatistics(): Promise<boolean> {
+      if (!active) return Promise.resolve(false);
+      if (!pending) pending = requestStatistics().finally(() => { pending = null; });
+      return pending;
+    }
+    reloadStatistics.current = loadStatistics;
+    void loadStatistics();
+    const interval = window.setInterval(() => { void loadStatistics(); }, 5000);
+    return () => { active = false; controller.abort(); window.clearInterval(interval); reloadStatistics.current = async () => false; };
+  }, [canViewStatistics]);
 
   useEffect(() => {
     let active = true;
-    let loading = false;
-
-    async function loadDashboardData(showLoading = false) {
-      if (!active || loading) return;
-      loading = true;
-
+    let pending: Promise<boolean> | null = null;
+    const controller = new AbortController();
+    setAlertsState(previous => previous.key === alertsQueryKey ? previous : { ...initialSectionState, key: alertsQueryKey });
+    async function requestAlerts(): Promise<boolean> {
+      setAlertsState(previous => ({ ...previous, refreshing: true }));
       try {
-        if (showLoading) {
-          setStatisticsLoading(true);
-          setAlertsLoading(true);
+        const data: AlertsResponse = await getAlerts({ severity: backendSeverity, limit: alertsPageSize, offset: requestedOffset }, controller.signal);
+        if (!active) return false;
+        const limit = Math.max(1, data.limit);
+        const lastPage = Math.max(1, Math.ceil(data.count / limit));
+        if (requestedOffset > 0 && requestedOffset >= data.count) {
+          setAlertsPage(lastPage);
+          return false;
         }
-
-        const [statisticsData, alertsData] = await Promise.all([
-          getStatistics(),
-          getAlerts(),
-        ]);
-
-        if (!active) return;
-
-        setStatistics(statisticsData as {
-          total_alerts: number;
-          severity: {
-            high: number;
-            medium: number;
-            low: number;
-          };
-        });
-        setAlerts(alertsData.alerts);
-        setStatisticsError(null);
-        setAlertsError(null);
+        const updatedAt = Date.now();
+        setAlerts(data.alerts);
+        setAlertsMetadata({ count: data.count, limit, offset: data.offset, key: alertsQueryKey, updatedAt });
+        setAlertsState({ status: data.alerts.length === 0 ? "empty" : "success", refreshing: false, error: null, updatedAt, key: alertsQueryKey });
+        return true;
       } catch (error) {
-        if (!active) return;
-
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Failed to load dashboard data";
-
-        setStatisticsError(message);
-        setAlertsError(message);
-      } finally {
-        loading = false;
-        if (active && showLoading) {
-          setStatisticsLoading(false);
-          setAlertsLoading(false);
-        }
+        if (!active) return false;
+        setAlertsState(previous => ({ ...previous, status: "error", refreshing: false, error: getApiErrorMessage(error), key: alertsQueryKey }));
+        return false;
       }
     }
-
-    void loadDashboardData(true);
-    const interval = window.setInterval(() => {
-      void loadDashboardData();
-    }, 5000);
-
-    return () => {
-      active = false;
-      window.clearInterval(interval);
-    };
-  }, []);
+    function loadAlerts(): Promise<boolean> {
+      if (!active) return Promise.resolve(false);
+      if (!pending) pending = requestAlerts().finally(() => { pending = null; });
+      return pending;
+    }
+    reloadAlerts.current = loadAlerts;
+    void loadAlerts();
+    const interval = window.setInterval(() => { void loadAlerts(); }, 5000);
+    return () => { active = false; controller.abort(); window.clearInterval(interval); reloadAlerts.current = async () => false; };
+  }, [backendSeverity, requestedOffset, alertsQueryKey]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -221,7 +297,7 @@ export default function App() {
     return () => { window.removeEventListener("keydown", onKeyDown); window.removeEventListener("pointerdown", onPointerDown); };
   }, []);
 
-  const liveEvents = useMemo<Event[]>(() => alerts.map(alert => {
+  const liveEvents = useMemo<Event[]>(() => (hasCurrentAlerts ? alerts : []).map(alert => {
     const rawSeverity = String(alert.severity ?? "Informational").toLowerCase();
     const normalizedSeverity: Severity =
       rawSeverity === "high" ? "High" :
@@ -247,46 +323,20 @@ export default function App() {
       process: value("process") || value("process_name") || "",
       raw: value("raw") || value("description") || value("rule") || "",
     };
-  }), [alerts]);
+  }), [alerts, hasCurrentAlerts]);
 
-  const navigate = (next: Page) => { setPage(next); setSearch(""); setSelectedEvent(null); setSelectedHost(null); setSelectedInvestigation(null); setMobileNav(false); setSeverity("All severities"); setHostFilter("All hosts"); setStatusFilter("All statuses"); setTypeFilter("All event types"); };
+  const navigate = (next: Page) => { setPage(canAccessPage(next, permissions) ? next : "Overview"); setSearch(""); setSelectedEvent(null); setSelectedHost(null); setSelectedInvestigation(null); setMobileNav(false); setSeverity("All severities"); setHostFilter("All hosts"); setStatusFilter("All statuses"); setTypeFilter("All event types"); setSourceFilter("All sources"); setUserFilter(""); setProcessFilter(""); setAlertsPage(1); };
   const flash = (message: string) => { setNotice(message); window.setTimeout(() => setNotice(""), 4000); };
   const refresh = async () => {
     setRefreshing(true);
-
     try {
-      const [statisticsData, alertsData] = await Promise.all([
-        getStatistics(),
-        getAlerts(),
-      ]);
-
-      setStatistics(statisticsData as {
-        total_alerts: number;
-        severity: {
-          high: number;
-          medium: number;
-          low: number;
-        };
-      });
-      setAlerts(alertsData.alerts);
-      setStatisticsError(null);
-      setAlertsError(null);
-      flash("Live security data refreshed.");
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Failed to refresh dashboard data";
-
-      setStatisticsError(message);
-      setAlertsError(message);
-    } finally {
-      setRefreshing(false);
-    }
+      const [statisticsOK, alertsOK] = await Promise.all([reloadStatistics.current(), reloadAlerts.current()]);
+      if (alertsOK && (statisticsOK || !canViewStatistics)) flash("Live security data refreshed.");
+    } finally { setRefreshing(false); }
   };
   const filteredEvents = useMemo(() => liveEvents.filter(e => {
-    const q = search.toLowerCase(); return (`${e.title} ${e.host} ${e.id} ${e.ip} ${e.raw}`.toLowerCase().includes(q)) && (severity === "All severities" || e.severity === severity) && (hostFilter === "All hosts" || e.host === hostFilter) && (statusFilter === "All statuses" || e.status === statusFilter) && (typeFilter === "All event types" || e.title === typeFilter) && (sourceFilter === "All sources" || e.source === sourceFilter) && e.user.toLowerCase().includes(userFilter.toLowerCase()) && e.process.toLowerCase().includes(processFilter.toLowerCase());
-  }), [search, severity, hostFilter, statusFilter, typeFilter, sourceFilter, userFilter, processFilter]);
+    const q = search.trim().toLowerCase(); return (`${e.title} ${e.host} ${e.id} ${e.ip} ${e.raw} ${e.source} ${e.user} ${e.process} ${e.status}`.toLowerCase().includes(q)) && (severity === "All severities" || e.severity === severity) && (hostFilter === "All hosts" || e.host === hostFilter) && (statusFilter === "All statuses" || e.status === statusFilter) && (typeFilter === "All event types" || e.title === typeFilter) && (sourceFilter === "All sources" || e.source === sourceFilter) && e.user.toLowerCase().includes(userFilter.toLowerCase()) && e.process.toLowerCase().includes(processFilter.toLowerCase());
+  }), [liveEvents, search, severity, hostFilter, statusFilter, typeFilter, sourceFilter, userFilter, processFilter]);
   const eventColumns = [
     { label: "TIMESTAMP", render: (e: Event) => <span className="mono muted">{e.time}</span> }, { label: "SEVERITY", render: (e: Event) => <Badge type={e.severity}>{e.severity}</Badge> },
     { label: "EVENT TYPE", render: (e: Event) => <span className="strong-cell">{e.title}</span> }, { label: "HOST", render: (e: Event) => <span className="mono">{e.host}</span> }, { label: "SOURCE", render: (e: Event) => <span className="mono muted">{e.source}</span> }, { label: "STATUS", render: (e: Event) => <Badge type={e.status}>{e.status}</Badge> },
@@ -298,32 +348,34 @@ export default function App() {
   const investigationColumns = [
     { label: "INVESTIGATION", render: (i: Investigation) => <span className="investigation-name"><span className="strong-cell">{i.name}</span><small>{i.id}</small></span> }, { label: "SEVERITY", render: (i: Investigation) => <Badge type={i.severity}>{i.severity}</Badge> }, { label: "HOST", render: (i: Investigation) => <span className="mono">{i.host}</span> }, { label: "STATUS", render: (i: Investigation) => <Badge type={investigationStatus[i.id] || i.status}>{investigationStatus[i.id] || i.status}</Badge> }, { label: "ASSIGNED TO", render: (i: Investigation) => <span className="muted">{i.analyst}</span> }, { label: "CREATED", render: (i: Investigation) => <span className="muted">{i.created}</span> }, { label: "LAST UPDATED", render: (i: Investigation) => <span className="muted">{i.updated}</span> },
   ];
-  const openRule = (rule: Rule | "new") => { setRuleModal(rule); setRuleName(rule === "new" ? "" : rule.name); setRuleDescription(rule === "new" ? "" : rule.description); setRuleSeverity(rule === "new" ? "Medium" : rule.severity); };
-  const saveRule = () => { if (!ruleName.trim() || !ruleDescription.trim()) return; if (ruleModal === "new") { setRules([...rules, { name: ruleName.trim(), description: ruleDescription.trim(), severity: ruleSeverity, enabled: true, source: "auth.log", last: "Never", count: 0 }]); flash("Detection rule created and enabled."); } else if (ruleModal) { setRules(rules.map(r => r.name === ruleModal.name ? { ...r, name: ruleName.trim(), description: ruleDescription.trim(), severity: ruleSeverity } : r)); flash("Detection rule updated."); } setRuleModal(null); };
-  const eventFilters = <div className="filters"><SelectField value={severity} onChange={setSeverity} options={["All severities", "High", "Medium", "Low", "Informational"]} label="Filter by severity"/><SelectField value={hostFilter} onChange={setHostFilter} options={["All hosts", ...hosts.map(h => h.name)]} label="Filter by host"/><SelectField value={typeFilter} onChange={setTypeFilter} options={["All event types", ...liveEvents.map(e => e.title)]} label="Filter by event type"/><SelectField value={statusFilter} onChange={setStatusFilter} options={["All statuses", "Open", "Investigating", "Resolved"]} label="Filter by status"/></div>;
+  const openRule = (rule: Rule | "new") => { if (!canManageRules) return; setRuleModal(rule); setRuleName(rule === "new" ? "" : rule.name); setRuleDescription(rule === "new" ? "" : rule.description); setRuleSeverity(rule === "new" ? "Medium" : rule.severity); };
+  const saveRule = () => { if (!canManageRules || !ruleName.trim() || !ruleDescription.trim()) return; if (ruleModal === "new") { setRules([...rules, { name: ruleName.trim(), description: ruleDescription.trim(), severity: ruleSeverity, enabled: true, source: "auth.log", last: "Never", count: 0 }]); flash("Detection rule created and enabled."); } else if (ruleModal) { setRules(rules.map(r => r.name === ruleModal.name ? { ...r, name: ruleName.trim(), description: ruleDescription.trim(), severity: ruleSeverity } : r)); flash("Detection rule updated."); } setRuleModal(null); };
+  const eventFilters = <div className="filters"><SelectField value={severity} onChange={setSeverity} options={["All severities", "High", "Medium", "Low", "Informational"]} label="Filter by severity"/><SelectField value={hostFilter} onChange={setHostFilter} options={["All hosts", ...Array.from(new Set([...hosts.map(h => h.name), ...liveEvents.map(e => e.host)]))]} label="Filter by host"/><SelectField value={typeFilter} onChange={setTypeFilter} options={["All event types", ...Array.from(new Set(liveEvents.map(e => e.title)))]} label="Filter by event type"/><SelectField value={statusFilter} onChange={setStatusFilter} options={["All statuses", "Open", "Investigating", "Resolved"]} label="Filter by status"/></div>;
   const pageDescription: Record<Page,string> = { Overview: "Monitor security activity across your Linux environment.", "Events & Alerts": "Review, filter, and triage detected security activity.", Investigations: "Track active cases and organize your response.", "Linux Hosts": "Monitor the security posture of your Linux infrastructure.", Logs: "Search and inspect raw system and security logs.", "Detection Rules": "Manage the rules that identify suspicious activity.", Reports: "Review security trends and share operational summaries.", Settings: "Manage your workspace preferences." };
   const heading = page === "Overview" ? "Security Overview" : page;
   return <div className="app-shell" data-theme={theme}>
-    <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}><div className="brand"><div className="brand-mark"><Icon name="shield" size={22}/></div><div><strong>AISOP</strong><span>LINUX SECURITY</span></div></div><div className="workspace-label">WORKSPACE <Icon name="down" size={13}/></div><div className="workspace-control"><button type="button" className={`workspace-name ${showWorkspace ? "open" : ""}`} aria-haspopup="dialog" aria-expanded={showWorkspace} onClick={() => { setShowWorkspace(!showWorkspace); setShowProfile(false); }}><span className="workspace-avatar">P</span><span>Production Environment</span><Icon name="down" size={14} className="workspace-chevron"/></button>{showWorkspace && <div className="workspace-popover" role="dialog" aria-label="Workspace selector"><span>Current workspace</span><strong>Production Environment</strong><small>Active environment</small></div>}</div><div className="nav-label">MONITORING</div><nav aria-label="Main navigation">{nav.map((item, index) => <div key={item.label}>{index === 4 && <div className="nav-label nav-label-spaced">MANAGEMENT</div>}<button type="button" className={`nav-item ${page === item.label ? "active" : ""}`} onClick={() => navigate(item.label)}><Icon name={item.icon} size={18}/><span>{item.label}</span>{item.label === "Events & Alerts" && <span className="nav-count">{statisticsLoading ? "…" : statistics?.total_alerts ?? 0}</span>}</button></div>)}</nav><div className="sidebar-bottom"><div className="system-status"><span className="live-dot status-pulse"/><div><strong>ala k</strong><span>Workspace Ready</span></div></div></div></aside>
+    <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}><div className="brand"><div className="brand-mark"><Icon name="shield" size={22}/></div><div><strong>AISOP</strong><span>LINUX SECURITY</span></div></div><div className="workspace-label">WORKSPACE <Icon name="down" size={13}/></div><div className="workspace-control"><button type="button" className={`workspace-name ${showWorkspace ? "open" : ""}`} aria-haspopup="dialog" aria-expanded={showWorkspace} onClick={() => { setShowWorkspace(!showWorkspace); setShowProfile(false); }}><span className="workspace-avatar">P</span><span>Production Environment</span><Icon name="down" size={14} className="workspace-chevron"/></button>{showWorkspace && <div className="workspace-popover" role="dialog" aria-label="Workspace selector"><span>Current workspace</span><strong>Production Environment</strong><small>Active environment</small></div>}</div><div className="nav-label">MONITORING</div><nav aria-label="Main navigation">{nav.filter(item => canAccessPage(item.label, permissions)).map((item, index) => <div key={item.label}>{index === 4 && <div className="nav-label nav-label-spaced">MANAGEMENT</div>}<button type="button" className={`nav-item ${page === item.label ? "active" : ""}`} onClick={() => navigate(item.label)}><Icon name={item.icon} size={18}/><span>{item.label}</span>{item.label === "Events & Alerts" && <span className="nav-count">{statisticsLoading ? "…" : statistics?.total_alerts ?? (alertsPending ? "…" : alertsMetadata.count)}</span>}</button></div>)}</nav><div className="sidebar-bottom"><div className="system-status"><span className="live-dot status-pulse"/><div><strong>{currentUser.username}</strong><span>{currentUser.role.toUpperCase()}</span></div></div></div></aside>
     {mobileNav && <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileNav(false)}/>}
-    <div className="main-area"><header className="topbar"><div className="topbar-left"><button type="button" className="mobile-menu" onClick={() => setMobileNav(true)} aria-label="Open navigation"><Icon name="grid"/></button><span className="breadcrumb">Workspace</span><Icon name="chevron" size={13}/><span className="breadcrumb-current">{page}</span></div><div className="topbar-right"><SearchField value={globalSearch} onChange={setGlobalSearch} placeholder="Search events, hosts..." className="global-search"/><span className="keyboard-hint">⌘ K</span><span className="topbar-divider"/><button type="button" className="icon-button" aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"} title={theme === "dark" ? "Light mode" : "Dark mode"} onClick={toggleTheme}><Icon name={theme === "dark" ? "sun" : "moon"} size={19}/></button><div className="notification-wrap"><button type="button" className="icon-button" aria-label="Notifications" onClick={() => setShowNotifications(!showNotifications)}><Icon name="bell" size={19}/>{(statistics?.severity.high ?? 0) > 0 && <span className="notification-dot"/>}</button>{showNotifications && <div className="notification-popover"><strong>Notifications</strong><p>{statistics?.severity.high ?? 0} high-priority {(statistics?.severity.high ?? 0) === 1 ? "alert needs" : "alerts need"} review.</p><Button variant="ghost" className="view-link" onClick={() => { navigate("Events & Alerts"); setSeverity("High"); setShowNotifications(false); }}>View high alerts <Icon name="arrow" size={14}/></Button></div>}</div><span className="topbar-divider"/><div className="header-profile-wrap"><button type="button" className={`header-profile ${showProfile ? "open" : ""}`} aria-haspopup="menu" aria-expanded={showProfile} onClick={() => { setShowProfile(!showProfile); setShowWorkspace(false); }}><span className="top-avatar">AK</span><span className="header-profile-copy"><strong>Ala K.</strong><small>Security Analyst</small></span><Icon name="down" size={14} className="profile-chevron"/></button>{showProfile && <div className="profile-menu" role="menu"><button type="button" role="menuitem" onClick={() => { setShowProfile(false); navigate("Settings"); }}><Icon name="user" size={16}/>Profile</button><button type="button" role="menuitem" onClick={() => { setShowProfile(false); navigate("Settings"); }}><Icon name="settings" size={16}/>Settings</button><span className="profile-menu-divider"/><button type="button" role="menuitem" className="logout-item" onClick={() => { setShowProfile(false); flash("Logout selected. Connect authentication to end the session."); }}><Icon name="logout" size={16}/>Logout</button></div>}</div></div></header>
+    <div className="main-area"><header className="topbar"><div className="topbar-left"><button type="button" className="mobile-menu" onClick={() => setMobileNav(true)} aria-label="Open navigation"><Icon name="grid"/></button><span className="breadcrumb">Workspace</span><Icon name="chevron" size={13}/><span className="breadcrumb-current">{page}</span></div><div className="topbar-right"><SearchField value={globalSearch} onChange={setGlobalSearch} placeholder="Search events, hosts..." className="global-search"/><span className="keyboard-hint">⌘ K</span><span className="topbar-divider"/><button type="button" className="icon-button" aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"} title={theme === "dark" ? "Light mode" : "Dark mode"} onClick={toggleTheme}><Icon name={theme === "dark" ? "sun" : "moon"} size={19}/></button><div className="notification-wrap"><button type="button" className="icon-button" aria-label="Notifications" onClick={() => setShowNotifications(!showNotifications)}><Icon name="bell" size={19}/>{(statistics?.severity.high ?? 0) > 0 && <span className="notification-dot"/>}</button>{showNotifications && <div className="notification-popover"><strong>Notifications</strong><p>{statistics ? <>{statistics.severity.high} high-priority {statistics.severity.high === 1 ? "alert needs" : "alerts need"} review.</> : "Alert statistics are unavailable. Open alerts to review security activity."}</p><Button variant="ghost" className="view-link" onClick={() => { navigate("Events & Alerts"); setSeverity("High"); setShowNotifications(false); }}>View high alerts <Icon name="arrow" size={14}/></Button></div>}</div><span className="topbar-divider"/><div className="header-profile-wrap"><button type="button" className={`header-profile ${showProfile ? "open" : ""}`} aria-haspopup="menu" aria-expanded={showProfile} onClick={() => { setShowProfile(!showProfile); setShowWorkspace(false); }}><span className="top-avatar">{initials}</span><span className="header-profile-copy"><strong>{currentUser.username}</strong><small>{currentUser.role.toUpperCase()}</small></span><Icon name="down" size={14} className="profile-chevron"/></button>{showProfile && <div className="profile-menu" role="menu">{canAccessSettings && <><button type="button" role="menuitem" onClick={() => { setShowProfile(false); navigate("Settings"); }}><Icon name="user" size={16}/>Profile</button><button type="button" role="menuitem" onClick={() => { setShowProfile(false); navigate("Settings"); }}><Icon name="settings" size={16}/>Settings</button><span className="profile-menu-divider"/></>}<button type="button" role="menuitem" className="logout-item" onClick={() => onLogout()}><Icon name="logout" size={16}/>Logout</button></div>}</div></div></header>
     {globalSearch.trim() && <div className="global-results"><div className="global-results-title">Search results for “{globalSearch}”</div>{liveEvents.filter(e => `${e.title} ${e.host} ${e.id}`.toLowerCase().includes(globalSearch.toLowerCase())).slice(0,4).map(e => <button key={e.id} onClick={() => { setGlobalSearch(""); navigate("Events & Alerts"); setSelectedEvent(e); }}><Icon name="activity" size={15}/><span>{e.title}<small>{e.id} · {e.host}</small></span><Icon name="chevron" size={14}/></button>)}{!liveEvents.some(e => `${e.title} ${e.host} ${e.id}`.toLowerCase().includes(globalSearch.toLowerCase())) && <p>No matching events. Try a host name or event type.</p>}</div>}
-    <main className="content"><div className="page-intro"><div><div className="eyebrow">SECURITY OPERATIONS <span>/</span> {page.toUpperCase()}</div><h1>{selectedHost ? selectedHost.name : selectedInvestigation ? selectedInvestigation.name : heading}</h1><p>{selectedHost ? `${selectedHost.os} · ${selectedHost.ip}` : selectedInvestigation ? `${selectedInvestigation.id} · ${selectedInvestigation.host}` : pageDescription[page]}</p></div><div className="intro-actions">{(selectedHost || selectedInvestigation) && <Button icon="chevron" onClick={() => { setSelectedHost(null); setSelectedInvestigation(null); }}>Back to {page}</Button>}<SelectField value={timeRange} onChange={setTimeRange} options={["Last 24 hours", "Last 7 days", "Last 30 days"]} label="Time range"/><Button icon="refresh" title="Refresh sample data" onClick={refresh} disabled={refreshing}>{refreshing ? "Refreshing..." : "Refresh"}</Button></div></div>
-    {refreshing && <div className="loading-state" role="status"><span className="loading-spinner"/>Checking sample data...</div>}
+    <main className="content"><div className="page-intro"><div><div className="eyebrow">SECURITY OPERATIONS <span>/</span> {page.toUpperCase()}</div><h1>{selectedHost ? selectedHost.name : selectedInvestigation ? selectedInvestigation.name : heading}</h1><p>{selectedHost ? `${selectedHost.os} · ${selectedHost.ip}` : selectedInvestigation ? `${selectedInvestigation.id} · ${selectedInvestigation.host}` : pageDescription[page]}</p></div><div className="intro-actions">{(selectedHost || selectedInvestigation) && <Button icon="chevron" onClick={() => { setSelectedHost(null); setSelectedInvestigation(null); }}>Back to {page}</Button>}<SelectField value={timeRange} onChange={setTimeRange} options={["Last 24 hours", "Last 7 days", "Last 30 days"]} label="Time range"/><Button icon="refresh" title="Refresh live security data" onClick={refresh} disabled={refreshing}>{refreshing ? "Refreshing..." : "Refresh"}</Button></div></div>
+    {refreshing && <div className="loading-state" role="status"><span className="loading-spinner"/>Refreshing live security data...</div>}
+    <DataSectionStatus label="Statistics" state={statisticsState} hasData={statistics !== null} onRetry={() => { void reloadStatistics.current(); }} retryAllowed={canViewStatistics}/>
+    <DataSectionStatus label="Alerts" state={{ ...currentAlertsState, updatedAt: hasCurrentAlerts ? alertsMetadata.updatedAt : null }} hasData={hasCurrentAlerts} onRetry={() => { void reloadAlerts.current(); }}/>
     {page === "Overview" && <>
       <div className="overview-status"><span className="live-dot"/><strong>Monitoring active</strong><span className="status-separator"/> 24 sample hosts <span className="status-separator"/> Demo data</div>
       <div className="stats-grid">
         <StatCard
           label="Total Alerts"
-          value={statisticsLoading ? "..." : String(statistics?.total_alerts ?? 0)}
-          change="Live data"
+          value={statisticsLoading ? "..." : String(statistics?.total_alerts ?? "—")}
+          change={statisticsStale ? "Stale data" : statisticsState.refreshing ? "Updating…" : "Live data"}
           tone="info"
           icon="activity"
           onClick={() => navigate("Events & Alerts")}
         />
         <StatCard
           label="High Alerts"
-          value={statisticsLoading ? "..." : String(statistics?.severity.high ?? 0)}
+          value={statisticsLoading ? "..." : String(statistics?.severity.high ?? "—")}
           change="Live data"
           tone="danger"
           icon="shield"
@@ -331,7 +383,7 @@ export default function App() {
         />
         <StatCard
           label="Medium Alerts"
-          value={statisticsLoading ? "..." : String(statistics?.severity.medium ?? 0)}
+          value={statisticsLoading ? "..." : String(statistics?.severity.medium ?? "—")}
           change="Live data"
           tone="warning"
           icon="activity"
@@ -339,35 +391,177 @@ export default function App() {
         />
         <StatCard
           label="Low Alerts"
-          value={statisticsLoading ? "..." : String(statistics?.severity.low ?? 0)}
+          value={statisticsLoading ? "..." : String(statistics?.severity.low ?? "—")}
           change="Live data"
           tone="success"
           icon="shield"
           onClick={() => { navigate("Events & Alerts"); setSeverity("Low"); }}
         />
       </div>
-      {statisticsError && (
-        <div className="overview-status">
-          Unable to load live statistics: {statisticsError}
-        </div>
-      )}
-      <div className="overview-charts"><Panel className="activity-panel"><SectionHeading title="Security Activity" subtitle="Event volume across your environment"/><ActivityChart/></Panel><Panel className="severity-panel"><SectionHeading title="Alert Severity" subtitle="Distribution · current alert statistics"/><SeverityChart statistics={statistics}/></Panel></div>
+      <div className="overview-charts"><Panel className="activity-panel"><SectionHeading title="Security Activity" subtitle="Event volume across your environment"/><ActivityChart/></Panel><Panel className="severity-panel"><SectionHeading title="Alert Severity" subtitle="Distribution · current alert statistics"/>{statistics ? <SeverityChart statistics={statistics}/> : <p className="drawer-help">{statisticsLoading ? "Loading statistics…" : statisticsError || "Statistics unavailable."}</p>}</Panel></div>
       <Panel><SectionHeading title="Top Affected Hosts" subtitle="Hosts with the most security alerts" action={<Button variant="ghost" className="view-link" onClick={() => navigate("Linux Hosts")}>View all hosts <Icon name="arrow" size={15}/></Button>}/><DataTable columns={hostColumns} rows={hosts.slice(0,4)} rowKey={h => h.name} onRow={h => { navigate("Linux Hosts"); setSelectedHost(h); }}/></Panel>
-      <Panel><SectionHeading title="Recent Security Events" subtitle="Latest events requiring analyst attention" action={<Button variant="ghost" className="view-link" onClick={() => navigate("Events & Alerts")}>View all events <Icon name="arrow" size={15}/></Button>}/><DataTable columns={eventColumns} rows={liveEvents.slice(0,6)} rowKey={e => e.id} onRow={e => { navigate("Events & Alerts"); setSelectedEvent(e); }}/></Panel>
+      <Panel><SectionHeading title="Recent Security Events" subtitle="Latest events requiring analyst attention" action={<Button variant="ghost" className="view-link" onClick={() => navigate("Events & Alerts")}>View all events <Icon name="arrow" size={15}/></Button>}/><DataTable columns={eventColumns} rows={liveEvents.slice(0,6)} empty={alertsPending || (alertsError && !hasCurrentAlerts) ? <></> : <EmptyState title="No alerts found" description="No alerts have been returned by the API."/>} rowKey={e => e.id} onRow={e => { navigate("Events & Alerts"); setSelectedEvent(e); }}/></Panel>
       <Panel><SectionHeading title="Open Investigations" subtitle="Cases currently in progress" action={<Button variant="ghost" className="view-link" onClick={() => navigate("Investigations")}>View investigations <Icon name="arrow" size={15}/></Button>}/><DataTable columns={investigationColumns.filter(c => c.label !== "ASSIGNED TO")} rows={investigations.filter(i => i.status !== "Resolved").slice(0,4)} rowKey={i => i.id} onRow={i => { navigate("Investigations"); setSelectedInvestigation(i); }}/></Panel>
     </>}
-    {page === "Events & Alerts" && <Panel className="page-panel"><SectionHeading title="Security Events" subtitle="Select an event to inspect its details and raw log" action={<span className="result-count">{filteredEvents.length} events</span>}/><div className="toolbar"><SearchField value={search} onChange={setSearch} placeholder="Search events, hosts, IPs..."/>{eventFilters}</div>{alertsLoading && <div className="overview-status">Loading live alerts...</div>}{alertsError && <div className="overview-status">Unable to load live alerts: {alertsError}</div>}<DataTable columns={eventColumns} rows={filteredEvents} rowKey={e => e.id} onRow={setSelectedEvent} empty={<EmptyState onReset={() => { setSearch(""); setSeverity("All severities"); setHostFilter("All hosts"); setStatusFilter("All statuses"); setTypeFilter("All event types"); }}/>} /><div className="table-footer">Showing {filteredEvents.length} of {liveEvents.length} recent events <span>Results from {timeRange.toLowerCase()}</span></div></Panel>}
-    {page === "Investigations" && (selectedInvestigation ? <><div className="detail-layout"><div className="detail-main"><Panel><SectionHeading title="Summary" action={<Badge type={selectedInvestigation.severity}>{selectedInvestigation.severity}</Badge>}/><p className="body-copy">{selectedInvestigation.summary}</p><div className="info-grid"><Info label="Affected host" value={selectedInvestigation.host}/><Info label="Assigned analyst" value={selectedInvestigation.analyst}/><Info label="Created" value={selectedInvestigation.created}/><Info label="Last updated" value={selectedInvestigation.updated}/></div></Panel><Panel><SectionHeading title="Event Timeline" subtitle="Activity related to this investigation"/><div className="timeline">{liveEvents.filter(e => e.host === selectedInvestigation.host).slice(0,4).map(e => <button key={e.id} className="timeline-item" onClick={() => setSelectedEvent(e)}><span className="timeline-node"/><span><small>{e.time}</small><strong>{e.title}</strong><span>{e.source} · {e.id}</span></span><Icon name="chevron" size={15}/></button>)}</div></Panel><Panel><SectionHeading title="Evidence & Analyst Notes"/><div className="evidence-block"><Icon name="terminal" size={18}/><div><strong>Evidence from related events</strong><p>Review raw event records in the timeline to validate activity on {selectedInvestigation.host}.</p></div></div><label className="field-label" htmlFor="analyst-notes">Analyst notes</label><textarea id="analyst-notes" className="notes-input" placeholder="Add your findings and next steps..." rows={4}/><div className="field-action"><Button onClick={() => flash("Analyst note saved for this session.")}>Save note</Button></div></Panel></div><div className="detail-side"><Panel><SectionHeading title="Case Status"/><Badge type={investigationStatus[selectedInvestigation.id] || selectedInvestigation.status}>{investigationStatus[selectedInvestigation.id] || selectedInvestigation.status}</Badge><label className="field-label top-gap">Update status</label><SelectField value={investigationStatus[selectedInvestigation.id] || selectedInvestigation.status} onChange={value => setInvestigationStatus({ ...investigationStatus, [selectedInvestigation.id]: value })} options={["Open", "Investigating", "Resolved"]} label="Investigation status"/></Panel><Panel><SectionHeading title="Affected Host"/><button className="linked-host" onClick={() => { const h = hosts.find(h => h.name === selectedInvestigation.host); if (h) { navigate("Linux Hosts"); setSelectedHost(h); } }}><Icon name="server" size={18}/><span>{selectedInvestigation.host}</span><Icon name="arrow" size={15}/></button></Panel></div></div></> : <Panel className="page-panel"><SectionHeading title="Investigation Queue" subtitle="Coordinate and track security cases" action={<span className="result-count">{investigations.filter(i => (investigationStatus[i.id] || i.status) !== "Resolved").length} active cases</span>}/><div className="toolbar"><SearchField value={search} onChange={setSearch} placeholder="Search investigations..."/><SelectField value={statusFilter} onChange={setStatusFilter} options={["All statuses", "Open", "Investigating", "Resolved"]} label="Filter by status"/><SelectField value={severity} onChange={setSeverity} options={["All severities", "High", "Medium", "Low"]} label="Filter by severity"/></div><DataTable columns={investigationColumns} rows={investigations.filter(i => `${i.name} ${i.host} ${i.id}`.toLowerCase().includes(search.toLowerCase()) && (statusFilter === "All statuses" || (investigationStatus[i.id] || i.status) === statusFilter) && (severity === "All severities" || i.severity === severity))} rowKey={i => i.id} onRow={setSelectedInvestigation} empty={<EmptyState onReset={() => { setSearch(""); setStatusFilter("All statuses"); setSeverity("All severities"); }}/>} /></Panel>)}
+    {page === "Events & Alerts" && <Panel className="page-panel">
+      <SectionHeading title="Security Events" subtitle="Select an event to inspect its details and raw log" action={<span className="result-count">{alertsPending ? "Loading…" : !hasCurrentAlerts ? "Unavailable" : `${filteredEvents.length} shown · ${alertsMetadata.count} total`}</span>}/>
+      <div className="toolbar"><SearchField value={search} onChange={setSearch} placeholder="Search events, hosts, IPs..."/>{eventFilters}</div>
+      <p className="muted" style={{ padding: "0 20px" }}>Search and host, event type, and status filters apply to the current page.</p>
+      <DataTable columns={eventColumns} rows={alertsPending ? [] : filteredEvents} rowKey={e => e.id} onRow={setSelectedEvent} empty={alertsPending || (alertsError && !hasCurrentAlerts) ? <></> : <EmptyState title={alertsMetadata.count === 0 ? backendSeverity ? `No ${backendSeverity} alerts found` : "No alerts found" : "No matching alerts on this page"} description={alertsMetadata.count === 0 ? "Try another severity or refresh for new alerts." : "Try adjusting your filters or checking another page."} onReset={() => { setSearch(""); setSeverity("All severities"); setHostFilter("All hosts"); setStatusFilter("All statuses"); setTypeFilter("All event types"); setSourceFilter("All sources"); setUserFilter(""); setProcessFilter(""); }}/>} />
+      <div className="table-footer" style={{ flexWrap: "wrap", gap: 12 }}>
+        <span aria-live="polite">{alertsPending ? "Loading page…" : !hasCurrentAlerts ? "Alert data unavailable for this page." : `Showing ${filteredEvents.length} of ${liveEvents.length} loaded alerts · Records ${liveEvents.length ? alertsMetadata.offset + 1 : 0}–${alertsMetadata.offset + liveEvents.length} of ${alertsMetadata.count}`}</span>
+        <div role="group" aria-label="Alerts pagination" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <Button onClick={() => setAlertsPage(current => Math.max(1, current - 1))} disabled={alertsPending || currentAlertsState.refreshing || alertsPage <= 1}>Previous</Button>
+          <span>Page {alertsPage} of {hasCurrentAlerts ? totalAlertPages : "…"}</span>
+          <Button onClick={() => setAlertsPage(current => Math.min(totalAlertPages, current + 1))} disabled={alertsPending || !hasCurrentAlerts || currentAlertsState.refreshing || alertsMetadata.offset + alertsMetadata.limit >= alertsMetadata.count}>Next</Button>
+        </div>
+      </div>
+    </Panel>}
+    {page === "Investigations" && (selectedInvestigation ? <><div className="detail-layout"><div className="detail-main"><Panel><SectionHeading title="Summary" action={<Badge type={selectedInvestigation.severity}>{selectedInvestigation.severity}</Badge>}/><p className="body-copy">{selectedInvestigation.summary}</p><div className="info-grid"><Info label="Affected host" value={selectedInvestigation.host}/><Info label="Assigned analyst" value={selectedInvestigation.analyst}/><Info label="Created" value={selectedInvestigation.created}/><Info label="Last updated" value={selectedInvestigation.updated}/></div></Panel><Panel><SectionHeading title="Event Timeline" subtitle="Activity related to this investigation"/><div className="timeline">{liveEvents.filter(e => e.host === selectedInvestigation.host).slice(0,4).map(e => <button key={e.id} className="timeline-item" onClick={() => setSelectedEvent(e)}><span className="timeline-node"/><span><small>{e.time}</small><strong>{e.title}</strong><span>{e.source} · {e.id}</span></span><Icon name="chevron" size={15}/></button>)}</div></Panel><Panel><SectionHeading title="Evidence & Analyst Notes"/><div className="evidence-block"><Icon name="terminal" size={18}/><div><strong>Evidence from related events</strong><p>Review raw event records in the timeline to validate activity on {selectedInvestigation.host}.</p></div></div><label className="field-label" htmlFor="analyst-notes">Analyst notes</label><textarea id="analyst-notes" readOnly={!canEditInvestigations} className="notes-input" placeholder="Add your findings and next steps..." rows={4}/><div className="field-action"><Button disabled={!canEditInvestigations} onClick={() => { if (canEditInvestigations) flash("Analyst note saved for this session."); }}>Save note</Button></div></Panel></div><div className="detail-side"><Panel><SectionHeading title="Case Status"/><Badge type={investigationStatus[selectedInvestigation.id] || selectedInvestigation.status}>{investigationStatus[selectedInvestigation.id] || selectedInvestigation.status}</Badge>{canEditInvestigations && <><label className="field-label top-gap">Update status</label><SelectField value={investigationStatus[selectedInvestigation.id] || selectedInvestigation.status} onChange={value => { if (canEditInvestigations) setInvestigationStatus({ ...investigationStatus, [selectedInvestigation.id]: value }); }} options={["Open", "Investigating", "Resolved"]} label="Investigation status"/></>}</Panel><Panel><SectionHeading title="Affected Host"/><button className="linked-host" onClick={() => { const h = hosts.find(h => h.name === selectedInvestigation.host); if (h) { navigate("Linux Hosts"); setSelectedHost(h); } }}><Icon name="server" size={18}/><span>{selectedInvestigation.host}</span><Icon name="arrow" size={15}/></button></Panel></div></div></> : <Panel className="page-panel"><SectionHeading title="Investigation Queue" subtitle="Coordinate and track security cases" action={<span className="result-count">{investigations.filter(i => (investigationStatus[i.id] || i.status) !== "Resolved").length} active cases</span>}/><div className="toolbar"><SearchField value={search} onChange={setSearch} placeholder="Search investigations..."/><SelectField value={statusFilter} onChange={setStatusFilter} options={["All statuses", "Open", "Investigating", "Resolved"]} label="Filter by status"/><SelectField value={severity} onChange={setSeverity} options={["All severities", "High", "Medium", "Low"]} label="Filter by severity"/></div><DataTable columns={investigationColumns} rows={investigations.filter(i => `${i.name} ${i.host} ${i.id}`.toLowerCase().includes(search.toLowerCase()) && (statusFilter === "All statuses" || (investigationStatus[i.id] || i.status) === statusFilter) && (severity === "All severities" || i.severity === severity))} rowKey={i => i.id} onRow={setSelectedInvestigation} empty={<EmptyState onReset={() => { setSearch(""); setStatusFilter("All statuses"); setSeverity("All severities"); }}/>} /></Panel>)}
     {page === "Linux Hosts" && (selectedHost ? <><div className="host-summary-grid"><Panel><span className="mini-label">HOST STATUS</span><div className="host-summary-value"><Badge type={selectedHost.status}>{selectedHost.status}</Badge></div><small>Last seen {selectedHost.last}</small></Panel><Panel><span className="mini-label">SECURITY ALERTS</span><div className="host-summary-value">{selectedHost.alerts}</div><small>Highest: {selectedHost.severity}</small></Panel><Panel><span className="mini-label">CPU USAGE</span><div className="host-summary-value">{selectedHost.cpu}%</div><div className="meter"><span style={{ width: `${selectedHost.cpu}%` }}/></div></Panel><Panel><span className="mini-label">MEMORY USAGE</span><div className="host-summary-value">{selectedHost.memory}%</div><div className="meter"><span style={{ width: `${selectedHost.memory}%` }}/></div></Panel></div><div className="tabs" role="tablist" aria-label="Host details">{["Overview", "Recent Events", "Authentication", "Processes", "Network Activity", "Security Alerts", "System Information"].map(t => <button role="tab" aria-selected={hostTab === t} key={t} className={hostTab === t ? "active" : ""} onClick={() => setHostTab(t)}>{t}</button>)}</div><Panel className="page-panel">{["Overview", "System Information"].includes(hostTab) ? <><SectionHeading title={hostTab === "Overview" ? "Host Overview" : "System Information"}/><div className="info-grid host-info"><Info label="Hostname" value={selectedHost.name}/><Info label="IP address" value={selectedHost.ip}/><Info label="Operating system" value={selectedHost.os}/><Info label="Last seen" value={selectedHost.last}/><Info label="Risk level" value={<Badge type={selectedHost.severity}>{selectedHost.severity}</Badge>}/><Info label="Monitoring status" value={<Badge type={selectedHost.status}>{selectedHost.status}</Badge>}/></div></> : hostTab === "Network Activity" ? <EmptyState title="No network activity to display" description="No network activity records are available for this host in the selected time range."/> : <><SectionHeading title={hostTab} subtitle={`Recorded activity on ${selectedHost.name}`}/><DataTable columns={eventColumns} rows={liveEvents.filter(e => e.host === selectedHost.name && (hostTab !== "Authentication" || e.source === "auth.log") && (hostTab !== "Processes" || e.source === "auditd") && (hostTab !== "Security Alerts" || ["High"].includes(e.severity)))} rowKey={e => e.id} onRow={setSelectedEvent} empty={<EmptyState title="No matching activity" description="No records match this category and time range."/>}/></>}</Panel></> : <Panel className="page-panel"><SectionHeading title="Monitored Hosts" subtitle="Connected Linux assets and their security posture" action={<span className="result-count">24 hosts monitored</span>}/><div className="toolbar"><SearchField value={search} onChange={setSearch} placeholder="Search host or IP address..."/><SelectField value={severity} onChange={setSeverity} options={["All severities", "High", "Medium", "Low"]} label="Filter by risk"/></div><DataTable columns={[...hostColumns, { label: "CPU / MEMORY", render: (h: Host) => <span className="mono muted">{h.cpu}% / {h.memory}%</span> }]} rows={hosts.filter(h => `${h.name} ${h.ip} ${h.os}`.toLowerCase().includes(search.toLowerCase()) && (severity === "All severities" || h.severity === severity))} rowKey={h => h.name} onRow={h => { setSelectedHost(h); setHostTab("Overview"); }} empty={<EmptyState onReset={() => { setSearch(""); setSeverity("All severities"); }}/>} /></Panel>)}
-    {page === "Logs" && <Panel className="page-panel"><SectionHeading title="Log Explorer" subtitle="Search system, authentication, and audit logs" action={<span className="result-count">{filteredEvents.length} log entries</span>}/><div className="toolbar"><SearchField value={search} onChange={setSearch} placeholder="Search raw logs, hosts, IPs..."/><div className="filters"><SelectField value={hostFilter} onChange={setHostFilter} options={["All hosts", ...hosts.map(h => h.name)]} label="Filter by host"/><SelectField value={sourceFilter} onChange={setSourceFilter} options={["All sources", "auth.log", "auditd", "syslog"]} label="Filter by log source"/><SelectField value={severity} onChange={setSeverity} options={["All severities", "High", "Medium", "Low", "Informational"]} label="Filter by severity"/></div></div><div className="toolbar secondary-toolbar"><SearchField value={userFilter} onChange={setUserFilter} placeholder="Filter by user"/><SearchField value={processFilter} onChange={setProcessFilter} placeholder="Filter by process"/></div><div className="table-scroll"><table><thead><tr><th>TIMESTAMP</th><th>SEVERITY</th><th>HOST</th><th>SOURCE</th><th>PROCESS</th><th>MESSAGE</th><th></th></tr></thead><tbody>{filteredEvents.map(e => <Fragment key={e.id}><tr className="interactive-row" tabIndex={0} onClick={() => setExpandedLog(expandedLog === e.id ? null : e.id)} onKeyDown={key => { if (key.key === "Enter" || key.key === " ") { key.preventDefault(); setExpandedLog(expandedLog === e.id ? null : e.id); } }}><td className="mono muted">{e.time}</td><td><Badge type={e.severity}>{e.severity}</Badge></td><td className="mono">{e.host}</td><td className="mono muted">{e.source}</td><td className="mono muted">{e.process}</td><td className="log-message">{e.title}</td><td><Icon name="down" size={15} className={expandedLog === e.id ? "rotate-icon" : ""}/></td></tr>{expandedLog === e.id && <tr className="raw-row"><td colSpan={7}><div><span>RAW LOG · {e.id}</span><code>{e.raw}</code></div></td></tr>}</Fragment>)}</tbody></table>{filteredEvents.length === 0 && <EmptyState onReset={() => { setSearch(""); setHostFilter("All hosts"); setSourceFilter("All sources"); setSeverity("All severities"); setUserFilter(""); setProcessFilter(""); }}/>}</div></Panel>}
-    {page === "Detection Rules" && <Panel className="page-panel"><SectionHeading title="Detection Rules" subtitle="Configure the signals that generate security alerts" action={<Button variant="primary" icon="plus" onClick={() => openRule("new")}>Create Rule</Button>}/><div className="toolbar"><SearchField value={search} onChange={setSearch} placeholder="Search detection rules..."/><SelectField value={statusFilter} onChange={setStatusFilter} options={["All statuses", "Enabled", "Disabled"]} label="Filter by status"/></div><DataTable columns={[{ label: "RULE NAME", render: (r: Rule) => <span className="investigation-name"><span className="strong-cell">{r.name}</span><small>{r.description}</small></span> }, { label: "SEVERITY", render: (r: Rule) => <Badge type={r.severity}>{r.severity}</Badge> }, { label: "STATUS", render: (r: Rule) => <Badge type={r.enabled ? "Enabled" : "Disabled"}>{r.enabled ? "Enabled" : "Disabled"}</Badge> }, { label: "EVENT SOURCE", render: (r: Rule) => <span className="mono">{r.source}</span> }, { label: "LAST TRIGGERED", render: (r: Rule) => <span className="muted">{r.last}</span> }, { label: "TRIGGERS", render: (r: Rule) => r.count }, { label: "ACTIONS", render: (r: Rule) => <div className="row-actions"><Button variant="ghost" onClick={() => openRule(r)}>Edit</Button><Button variant="ghost" onClick={() => r.enabled ? setConfirmation(rules.indexOf(r)) : (setRules(rules.map(x => x === r ? { ...x, enabled: true } : x)), flash(`${r.name} enabled.`))}>{r.enabled ? "Disable" : "Enable"}</Button></div> }]} rows={rules.filter(r => `${r.name} ${r.description}`.toLowerCase().includes(search.toLowerCase()) && (statusFilter === "All statuses" || (r.enabled ? "Enabled" : "Disabled") === statusFilter))} rowKey={r => r.name} empty={<EmptyState onReset={() => { setSearch(""); setStatusFilter("All statuses"); }}/>} /></Panel>}
-    {page === "Reports" && <><div className="report-header"><div><span className="mini-label">SECURITY REPORT</span><h2>Environment summary</h2><p>Operational overview for {timeRange.toLowerCase()}</p></div><Button variant="primary" icon="download" onClick={() => { const activeInvestigations = investigations.filter(i => (investigationStatus[i.id] || i.status) !== "Resolved").length; const csv = `Metric,Value\nTotal alerts,${statistics?.total_alerts ?? 0}\nHigh alerts,${statistics?.severity.high ?? 0}\nMedium alerts,${statistics?.severity.medium ?? 0}\nLow alerts,${statistics?.severity.low ?? 0}\nActive investigations,${activeInvestigations}\n`; const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = "aisop-security-report.csv"; a.click(); URL.revokeObjectURL(a.href); flash("Report exported as CSV."); }}>Export report</Button></div><div className="report-grid"><Panel><SectionHeading title="Security Summary"/><div className="report-metrics"><div><strong>{statistics?.total_alerts ?? 0}</strong><span>Alerts recorded</span></div><div><strong>{statistics?.severity.high ?? 0}</strong><span>High-priority alerts</span></div><div><strong>{investigations.filter(i => (investigationStatus[i.id] || i.status) !== "Resolved").length}</strong><span>Active investigations</span></div></div></Panel><Panel><SectionHeading title="Investigation Statistics"/><div className="severity-rows report-rows"><div><span>Open</span><strong>2</strong></div><div><span>Investigating</span><strong>2</strong></div><div><span>Resolved</span><strong>1</strong></div></div></Panel><Panel className="report-wide"><SectionHeading title="Alert Trends" subtitle="Security event volume by severity"/><ActivityChart/></Panel><Panel><SectionHeading title="Top Affected Hosts"/><div className="rank-list">{hosts.slice(0,4).map((h, i) => <button key={h.name} onClick={() => { navigate("Linux Hosts"); setSelectedHost(h); }}><span className="rank">0{i+1}</span><span className="mono">{h.name}</span><strong>{h.alerts} alerts</strong></button>)}</div></Panel><Panel><SectionHeading title="Event Statistics"/><SeverityChart statistics={statistics}/></Panel></div></>}
-    {page === "Settings" && <div className="settings-layout"><Panel><SectionHeading title="Workspace" subtitle="Your current monitoring environment"/><div className="info-grid"><Info label="Workspace name" value="Production Environment"/><Info label="Environment" value="Linux Infrastructure"/><Info label="Monitored hosts" value="24 connected"/><Info label="Data status" value="Syncing normally"/></div></Panel><Panel><SectionHeading title="Profile"/><div className="info-grid"><Info label="Name" value="Ala K."/><Info label="Role" value="Security Analyst"/></div></Panel></div>}
+    {page === "Logs" && <Panel className="page-panel"><SectionHeading title="Log Explorer" subtitle="Search system, authentication, and audit logs" action={<span className="result-count">{filteredEvents.length} log entries</span>}/><div className="toolbar"><SearchField value={search} onChange={setSearch} placeholder="Search raw logs, hosts, IPs..."/><div className="filters"><SelectField value={hostFilter} onChange={setHostFilter} options={["All hosts", ...hosts.map(h => h.name)]} label="Filter by host"/><SelectField value={sourceFilter} onChange={setSourceFilter} options={["All sources", "auth.log", "auditd", "syslog"]} label="Filter by log source"/><SelectField value={severity} onChange={setSeverity} options={["All severities", "High", "Medium", "Low", "Informational"]} label="Filter by severity"/></div></div><div className="toolbar secondary-toolbar"><SearchField value={userFilter} onChange={setUserFilter} placeholder="Filter by user"/><SearchField value={processFilter} onChange={setProcessFilter} placeholder="Filter by process"/></div><div className="table-scroll"><table><thead><tr><th>TIMESTAMP</th><th>SEVERITY</th><th>HOST</th><th>SOURCE</th><th>PROCESS</th><th>MESSAGE</th><th></th></tr></thead><tbody>{filteredEvents.map(e => <Fragment key={e.id}><tr className="interactive-row" tabIndex={0} onClick={() => setExpandedLog(expandedLog === e.id ? null : e.id)} onKeyDown={key => { if (key.key === "Enter" || key.key === " ") { key.preventDefault(); setExpandedLog(expandedLog === e.id ? null : e.id); } }}><td className="mono muted">{e.time}</td><td><Badge type={e.severity}>{e.severity}</Badge></td><td className="mono">{e.host}</td><td className="mono muted">{e.source}</td><td className="mono muted">{e.process}</td><td className="log-message">{e.title}</td><td><Icon name="down" size={15} className={expandedLog === e.id ? "rotate-icon" : ""}/></td></tr>{expandedLog === e.id && <tr className="raw-row"><td colSpan={7}><div><span>RAW LOG · {e.id}</span><code>{e.raw}</code></div></td></tr>}</Fragment>)}</tbody></table>{filteredEvents.length === 0 && !alertsPending && !(alertsError && !hasCurrentAlerts) && <EmptyState title={alertsMetadata.count === 0 ? "No alerts found" : "No matching alerts on this page"} onReset={() => { setSearch(""); setHostFilter("All hosts"); setSourceFilter("All sources"); setSeverity("All severities"); setUserFilter(""); setProcessFilter(""); }}/>}</div></Panel>}
+    {page === "Detection Rules" && <Panel className="page-panel"><SectionHeading title="Detection Rules" subtitle="Configure the signals that generate security alerts" action={canManageRules ? <Button variant="primary" icon="plus" onClick={() => openRule("new")}>Create Rule</Button> : undefined}/><div className="toolbar"><SearchField value={search} onChange={setSearch} placeholder="Search detection rules..."/><SelectField value={statusFilter} onChange={setStatusFilter} options={["All statuses", "Enabled", "Disabled"]} label="Filter by status"/></div><DataTable columns={[{ label: "RULE NAME", render: (r: Rule) => <span className="investigation-name"><span className="strong-cell">{r.name}</span><small>{r.description}</small></span> }, { label: "SEVERITY", render: (r: Rule) => <Badge type={r.severity}>{r.severity}</Badge> }, { label: "STATUS", render: (r: Rule) => <Badge type={r.enabled ? "Enabled" : "Disabled"}>{r.enabled ? "Enabled" : "Disabled"}</Badge> }, { label: "EVENT SOURCE", render: (r: Rule) => <span className="mono">{r.source}</span> }, { label: "LAST TRIGGERED", render: (r: Rule) => <span className="muted">{r.last}</span> }, { label: "TRIGGERS", render: (r: Rule) => r.count }, { label: "ACTIONS", render: (r: Rule) => <div className="row-actions"><Button disabled={!canManageRules} variant="ghost" onClick={() => openRule(r)}>Edit</Button><Button variant="ghost" disabled={!canManageRules} onClick={() => { if (!canManageRules) return; r.enabled ? setConfirmation(rules.indexOf(r)) : (setRules(rules.map(x => x === r ? { ...x, enabled: true } : x)), flash(`${r.name} enabled.`)); }}>{r.enabled ? "Disable" : "Enable"}</Button></div> }]} rows={rules.filter(r => `${r.name} ${r.description}`.toLowerCase().includes(search.toLowerCase()) && (statusFilter === "All statuses" || (r.enabled ? "Enabled" : "Disabled") === statusFilter))} rowKey={r => r.name} empty={<EmptyState onReset={() => { setSearch(""); setStatusFilter("All statuses"); }}/>} /></Panel>}
+    {page === "Reports" && <><div className="report-header"><div><span className="mini-label">SECURITY REPORT</span><h2>Environment summary</h2><p>Operational overview for {timeRange.toLowerCase()}</p></div><Button variant="primary" icon="download" onClick={() => { const activeInvestigations = investigations.filter(i => (investigationStatus[i.id] || i.status) !== "Resolved").length; const csv = `Metric,Value\nTotal alerts,${statistics?.total_alerts ?? "—"}\nHigh alerts,${statistics?.severity.high ?? "—"}\nMedium alerts,${statistics?.severity.medium ?? "—"}\nLow alerts,${statistics?.severity.low ?? "—"}\nActive investigations,${activeInvestigations}\n`; const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = "aisop-security-report.csv"; a.click(); URL.revokeObjectURL(a.href); flash("Report exported as CSV."); }}>Export report</Button></div><div className="report-grid"><Panel><SectionHeading title="Security Summary"/><div className="report-metrics"><div><strong>{statistics?.total_alerts ?? "—"}</strong><span>Alerts recorded</span></div><div><strong>{statistics?.severity.high ?? "—"}</strong><span>High-priority alerts</span></div><div><strong>{investigations.filter(i => (investigationStatus[i.id] || i.status) !== "Resolved").length}</strong><span>Active investigations</span></div></div></Panel><Panel><SectionHeading title="Investigation Statistics"/><div className="severity-rows report-rows"><div><span>Open</span><strong>2</strong></div><div><span>Investigating</span><strong>2</strong></div><div><span>Resolved</span><strong>1</strong></div></div></Panel><Panel className="report-wide"><SectionHeading title="Alert Trends" subtitle="Security event volume by severity"/><ActivityChart/></Panel><Panel><SectionHeading title="Top Affected Hosts"/><div className="rank-list">{hosts.slice(0,4).map((h, i) => <button key={h.name} onClick={() => { navigate("Linux Hosts"); setSelectedHost(h); }}><span className="rank">0{i+1}</span><span className="mono">{h.name}</span><strong>{h.alerts} alerts</strong></button>)}</div></Panel><Panel><SectionHeading title="Event Statistics"/>{statistics ? <SeverityChart statistics={statistics}/> : <p className="drawer-help">{statisticsLoading ? "Loading statistics…" : statisticsError || "Statistics unavailable."}</p>}</Panel></div></>}
+    {page === "Settings" && canAccessSettings && <div className="settings-layout"><Panel><SectionHeading title="Workspace" subtitle="Your current monitoring environment"/><div className="info-grid"><Info label="Workspace name" value="Production Environment"/><Info label="Environment" value="Linux Infrastructure"/><Info label="Monitored hosts" value="24 connected"/><Info label="Data status" value="Syncing normally"/></div></Panel><Panel><SectionHeading title="Profile"/><div className="info-grid"><Info label="Name" value={currentUser.username}/><Info label="Role" value={currentUser.role.toUpperCase()}/></div></Panel></div>}
     </main></div>
     {selectedEvent && <><button type="button" className="drawer-backdrop" onClick={() => setSelectedEvent(null)} aria-label="Close event details"></button><aside className="detail-drawer" aria-label="Event details"><div className="drawer-header"><div><span className="mini-label">EVENT DETAILS · {selectedEvent.id}</span><h2>{selectedEvent.title}</h2></div><button className="icon-button" onClick={() => setSelectedEvent(null)} aria-label="Close details"><Icon name="close"/></button></div><div className="drawer-content"><div className="drawer-badges"><Badge type={selectedEvent.severity}>{selectedEvent.severity}</Badge><Badge type={selectedEvent.status}>{selectedEvent.status}</Badge></div><p className="drawer-help">Detected on {selectedEvent.host} from {selectedEvent.source}.</p><div className="drawer-section"><h3>Event information</h3><div className="drawer-info"><Info label="Timestamp" value={selectedEvent.time}/><Info label="Host" value={selectedEvent.host}/><Info label="User" value={selectedEvent.user}/><Info label="Source IP" value={selectedEvent.ip}/><Info label="Process" value={selectedEvent.process}/><Info label="Log source" value={selectedEvent.source}/></div></div><div className="drawer-section"><h3>Raw event / log</h3><pre className="raw-log">{selectedEvent.raw}</pre></div><div className="drawer-section"><h3>Related events</h3>{liveEvents.filter(e => e.host === selectedEvent.host && e.id !== selectedEvent.id).slice(0,3).map(e => <button className="related-event" key={e.id} onClick={() => setSelectedEvent(e)}><span>{e.title}<small>{e.time} · {e.id}</small></span><Icon name="chevron" size={15}/></button>)}{liveEvents.filter(e => e.host === selectedEvent.host && e.id !== selectedEvent.id).length === 0 && <p className="muted">No related events on this host.</p>}</div><div className="drawer-section"><h3>Investigation</h3>{investigations.find(i => i.host === selectedEvent.host) ? <button className="related-event" onClick={() => { const i = investigations.find(i => i.host === selectedEvent.host)!; setSelectedEvent(null); navigate("Investigations"); setSelectedInvestigation(i); }}><span>{investigations.find(i => i.host === selectedEvent.host)!.name}<small>Open investigation</small></span><Icon name="arrow" size={15}/></button> : <p className="muted">No investigation linked to this event.</p>}</div></div></aside></>}
-    {ruleModal && <div className="modal-layer" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) setRuleModal(null); }}><div className="modal" role="dialog" aria-modal="true" aria-label={ruleModal === "new" ? "Create detection rule" : "Edit detection rule"}><div className="modal-top"><div><span className="mini-label">DETECTION RULES</span><h2>{ruleModal === "new" ? "Create detection rule" : "Edit detection rule"}</h2></div><button className="icon-button" onClick={() => setRuleModal(null)} aria-label="Close dialog"><Icon name="close"/></button></div><p className="muted">Define a rule to flag suspicious activity in your Linux logs.</p><label className="field-label" htmlFor="rule-name">Rule name</label><input id="rule-name" className="text-input" value={ruleName} onChange={e => setRuleName(e.target.value)} placeholder="e.g. Unusual SSH access"/><label className="field-label" htmlFor="rule-description">Description</label><textarea id="rule-description" className="notes-input" value={ruleDescription} onChange={e => setRuleDescription(e.target.value)} placeholder="Describe what this rule detects" rows={3}/><label className="field-label">Severity</label><SelectField value={ruleSeverity} onChange={v => setRuleSeverity(v as Severity)} options={["High", "Medium", "Low", "Informational"]} label="Rule severity"/><div className="modal-actions"><Button onClick={() => setRuleModal(null)}>Cancel</Button><Button variant="primary" onClick={saveRule} disabled={!ruleName.trim() || !ruleDescription.trim()}>{ruleModal === "new" ? "Create rule" : "Save changes"}</Button></div></div></div>}
-    {confirmation !== null && <div className="modal-layer"><div className="modal confirm-modal" role="alertdialog" aria-modal="true" aria-label="Disable detection rule"><div className="modal-top"><h2>Disable detection rule?</h2></div><p>“{rules[confirmation]?.name}” will stop generating new alerts. You can re-enable it at any time.</p><div className="modal-actions"><Button onClick={() => setConfirmation(null)}>Cancel</Button><Button variant="primary" onClick={() => { const name = rules[confirmation].name; setRules(rules.map((r, i) => i === confirmation ? { ...r, enabled: false } : r)); setConfirmation(null); flash(`${name} disabled.`); }}>Disable rule</Button></div></div></div>}
+    {canManageRules && ruleModal && <div className="modal-layer" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) setRuleModal(null); }}><div className="modal" role="dialog" aria-modal="true" aria-label={ruleModal === "new" ? "Create detection rule" : "Edit detection rule"}><div className="modal-top"><div><span className="mini-label">DETECTION RULES</span><h2>{ruleModal === "new" ? "Create detection rule" : "Edit detection rule"}</h2></div><button className="icon-button" onClick={() => setRuleModal(null)} aria-label="Close dialog"><Icon name="close"/></button></div><p className="muted">Define a rule to flag suspicious activity in your Linux logs.</p><label className="field-label" htmlFor="rule-name">Rule name</label><input id="rule-name" className="text-input" value={ruleName} onChange={e => setRuleName(e.target.value)} placeholder="e.g. Unusual SSH access"/><label className="field-label" htmlFor="rule-description">Description</label><textarea id="rule-description" className="notes-input" value={ruleDescription} onChange={e => setRuleDescription(e.target.value)} placeholder="Describe what this rule detects" rows={3}/><label className="field-label">Severity</label><SelectField value={ruleSeverity} onChange={v => setRuleSeverity(v as Severity)} options={["High", "Medium", "Low", "Informational"]} label="Rule severity"/><div className="modal-actions"><Button onClick={() => setRuleModal(null)}>Cancel</Button><Button variant="primary" onClick={saveRule} disabled={!ruleName.trim() || !ruleDescription.trim()}>{ruleModal === "new" ? "Create rule" : "Save changes"}</Button></div></div></div>}
+    {canManageRules && confirmation !== null && <div className="modal-layer"><div className="modal confirm-modal" role="alertdialog" aria-modal="true" aria-label="Disable detection rule"><div className="modal-top"><h2>Disable detection rule?</h2></div><p>“{rules[confirmation]?.name}” will stop generating new alerts. You can re-enable it at any time.</p><div className="modal-actions"><Button onClick={() => setConfirmation(null)}>Cancel</Button><Button variant="primary" onClick={() => { if (!canManageRules) return; const rule = rules[confirmation]; if (!rule) { setConfirmation(null); return; } const name = rule.name; setRules(rules.map((r, i) => i === confirmation ? { ...r, enabled: false } : r)); setConfirmation(null); flash(`${name} disabled.`); }}>Disable rule</Button></div></div></div>}
     {notice && <div className="toast" role="status"><Icon name="check" size={17}/>{notice}<button aria-label="Dismiss notification" onClick={() => setNotice("")}><Icon name="close" size={14}/></button></div>}
   </div>;
 }
 function Info({ label, value }: { label: string; value: ReactNode }) { return <div className="info-item"><span>{label}</span><strong>{value}</strong></div>; }
+
+
+export default function App() {
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [checking, setChecking] = useState(true);
+  const [connectionError, setConnectionError] = useState<"unavailable" | "verification" | null>(null);
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [theme, setTheme] = useState<"dark" | "light">(() => localStorage.getItem("aisop-theme") === "light" ? "light" : "dark");
+  const loginPending = useRef(false);
+  const toggleTheme = () => setTheme(previous => {
+    const next = previous === "dark" ? "light" : "dark";
+    localStorage.setItem("aisop-theme", next);
+    return next;
+  });
+  const resetSession = useCallback((message = "") => {
+    setCurrentUser(null);
+    setConnectionError(null);
+    setPassword("");
+    setAuthError(message);
+    setChecking(false);
+  }, []);
+  const endSession = useCallback((message = "") => {
+    logout();
+    resetSession(message);
+  }, [resetSession]);
+
+  useEffect(() => subscribeUnauthorized(error => resetSession(getApiErrorMessage(error))), [resetSession]);
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    setChecking(true);
+    setAuthError("");
+    async function restoreSession() {
+      try {
+        if (hasAccessToken()) {
+          const user = await getCurrentUser(controller.signal);
+          if (active) { setCurrentUser(user); setConnectionError(null); }
+        } else if (active) {
+          setConnectionError(null);
+        }
+      } catch (error) {
+        if (active) {
+          const message = getApiErrorMessage(error);
+          if (!(error instanceof ApiRequestError && error.status === 401)) {
+            setConnectionError(isBackendUnavailable(error) ? "unavailable" : "verification");
+            setAuthError(message);
+          }
+        }
+      } finally {
+        if (active) setChecking(false);
+      }
+    }
+    void restoreSession();
+    return () => { active = false; controller.abort(); };
+  }, [connectionAttempt]);
+
+  const retryConnection = () => {
+    if (checking) return;
+    setChecking(true);
+    setConnectionAttempt(attempt => attempt + 1);
+  };
+
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if ((event.key === "aisop_access_token" || event.key === null) && currentUser) {
+        resetSession("Your session changed in another tab. Please sign in again.");
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [currentUser, resetSession]);
+
+  async function signIn(event: import("react").FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (loginPending.current || !username.trim() || !password) return;
+    loginPending.current = true;
+    setSubmitting(true);
+    setAuthError("");
+    try {
+      await login(username.trim(), password);
+      const user = await getCurrentUser();
+      setPassword("");
+      setCurrentUser(user);
+    } catch (error) {
+      const message = getApiErrorMessage(error);
+      if (!(error instanceof ApiRequestError && error.status === 401)) {
+        if (isBackendUnavailable(error) && hasAccessToken()) {
+          setPassword("");
+          setConnectionError("unavailable");
+        }
+        setAuthError(message);
+      }
+    } finally {
+      loginPending.current = false;
+      setSubmitting(false);
+    }
+  }
+
+  // Protected components and their effects exist only after /auth/me succeeds.
+  if (!checking && currentUser) return <Dashboard currentUser={currentUser} theme={theme} toggleTheme={toggleTheme} onLogout={endSession}/>;
+
+  return <div className="app-shell login-shell" data-theme={theme}>
+    <div className="login-grid-pattern" aria-hidden="true"/>
+    <header className="login-header"><div className="login-brand"><span className="login-brand-mark"><Icon name="shield" size={21}/></span><span><strong>AISOP</strong><small>LINUX SECURITY</small></span></div><button type="button" className="login-theme-toggle" onClick={toggleTheme} aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}><Icon name={theme === "dark" ? "sun" : "moon"} size={18}/></button></header>
+    <main className="login-main">
+      <section className="login-context" aria-label="Platform overview">
+        <h1>Protect every Linux workload from one command center.</h1>
+        <div className="login-capabilities">
+          <div><span><Icon name="activity" size={17}/></span><strong>Real-time monitoring</strong><small>Continuous visibility across connected hosts</small></div>
+        </div>
+      </section>
+      <section className="login-panel" aria-labelledby="login-title">
+        <div className="login-panel-top"><span className="login-security-icon"><Icon name="lock" size={19}/></span><span>AUTHORIZED ACCESS</span></div>
+        <div className="login-heading"><span>{connectionError ? "CONNECTION STATUS" : "WELCOME BACK"}</span><h2 id="login-title">{connectionError === "unavailable" ? "AISOP server unavailable" : connectionError ? "Unable to verify session" : "Sign in to AISOP"}</h2><p>{connectionError ? "Retry to reconnect to your workspace." : "Enter your workspace credentials to continue."}</p></div>
+        {connectionError ? <div className="login-form" aria-busy={checking}>
+          <p className="login-message visible" role="alert">{connectionError === "unavailable" ? "Unable to connect to AISOP server." : authError || "Unable to verify your session. Please try again."}</p>
+          <button type="button" className="login-submit" onClick={retryConnection} disabled={checking}>{checking ? <><span className="loading-spinner"/><span role="status">Connecting…</span></> : <><span>Retry Connection</span><Icon name="refresh" size={17}/></>}</button>
+        </div> : checking ? <div className="login-message" role="status"><span className="loading-spinner"/> Checking authentication…</div> : <form className="login-form" onSubmit={signIn} aria-busy={submitting}>
+          <label><span>Username</span><div className="login-input"><Icon name="user" size={17}/><input name="username" required disabled={submitting} aria-describedby={authError ? "login-error" : undefined} value={username} onChange={event => { setUsername(event.target.value); setAuthError(""); }} autoComplete="username" placeholder="Enter your username" autoFocus/></div></label>
+          <label><span>Password</span><div className="login-input"><Icon name="lock" size={17}/><input name="password" required disabled={submitting} aria-describedby={authError ? "login-error" : undefined} type={showPassword ? "text" : "password"} value={password} onChange={event => { setPassword(event.target.value); setAuthError(""); }} autoComplete="current-password" placeholder="Enter your password"/><button type="button" className="password-toggle" disabled={submitting} onClick={() => setShowPassword(current => !current)} aria-label={showPassword ? "Hide password" : "Show password"} aria-pressed={showPassword}><Icon name={showPassword ? "eye-off" : "eye"} size={18}/></button></div></label>
+          <p id="login-error" className={`login-message ${authError ? "visible" : ""}`} role={authError ? "alert" : "status"}>{authError || "Secure workspace authentication"}</p>
+          <button type="submit" className="login-submit" disabled={submitting || !username.trim() || !password}>{submitting ? <><span className="loading-spinner"/><span>Signing in…</span></> : <><span>Sign in securely</span><Icon name="arrow" size={17}/></>}</button>
+        </form>}
+        <div className="login-trust"><Icon name="shield" size={15}/><span>Encrypted connection</span><i/><span>Authorized users only</span></div>
+      </section>
+    </main>
+  </div>;
+}
